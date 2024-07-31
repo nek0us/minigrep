@@ -1,0 +1,23 @@
+[package]
+name = "minigrep"
+version = "0.1.1"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pcre2 = "*"
+pcre2-sys = "*"
+clipboard-win = "4.2"
+zip = "0.5.13"
+encoding_rs = "0.8.30"
+flate2 = "1.0.22"
+native-windows-gui = "1.0.0"
+
+
+# Windows子系统设置
+[profile.release]
+# 指示链接器为windows子系统构建程序，这样就不会有命令行窗口出现
+lto = true
+codegen-units = 1
+panic = 'abort'
