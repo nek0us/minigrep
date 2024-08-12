@@ -1,12 +1,19 @@
 
 use std::error::Error;
 use std::env;
-use native_windows_gui::stretch::result;
 use pcre2::bytes::Regex;
-
+use encoding_rs::GBK;
 
 pub fn run(config: Config) -> Result<Vec<(String, String)>, Box<dyn Error>> {
-    search(&config.query, &config.contents)
+    match search(&config.query, &config.contents) {
+        Ok(result) => Ok(result),
+        Err(_) => {
+            // 尝试使用GBK编码重新匹配
+            let gbk_encoded = GBK.encode(&config.contents).0;
+            let gbk_contents = String::from_utf8_lossy(gbk_encoded.as_ref()).to_string();
+            search(&config.query, &gbk_contents)
+        }
+    }
 }
 
 pub fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String)>, Box<dyn Error>> {

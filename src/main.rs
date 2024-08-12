@@ -42,9 +42,12 @@ impl FeatureLayout {
                 self.list_box.push(r"[a-zA-Z0-9\*]+\@[a-zA-Z0-9]+\.[a-zA-Z]+".to_string());
                 self.list_box.push(r"(?<!\d)(\d{17}[Xx]|\d{18})(?!\d)".to_string());
                 self.list_box.push("((P|p)ass(P|p)ort((N|n)o(s|S)?)?(\\s)?\"?(\\s)?\\:(\\s)?(\\[)?\"?[a-zA-Z0-9]+\"?[,;]+)".to_string()); //|((P|p)ass(P|p)ort((N|n)o)?\\:(\\t)?[a-zA-Z0-9]+)
+                self.list_box.push("(C|c)ertificate".to_string());
+                self.list_box.push("(I|i)(D|d)_?(C|c)ard".to_string());
             },
             1 => {  
                 self.list_box.push(r"passwd|password|PASSWORD|PASSWD|PassWd|PassWD|PassWord".to_string());
+                self.list_box.push(r"Pwd|PWD|pwd".to_string());
                 self.list_box.push(r"appkey|AppKey|appKey|appKEY|AppKEY|APPKEY".to_string());
                 self.list_box.push(r"skey|SKey|SKEY|sKey|sKEY".to_string());
                 self.list_box.push(r"access_token".to_string());
@@ -71,6 +74,9 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     list_view: nwg::ListView,
     tis: nwg::Label,
     dyn_tis: nwg::Label,
+
+    menu_update: nwg::MenuItem,
+    menu_about: nwg::MenuItem,
 
 }
 
@@ -125,9 +131,18 @@ impl BasicApp {
                     let contents = match fs::read_to_string(&path) {
                         Ok(c) => c,
                         Err(_) => {
-                            self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", &path.to_string_lossy()).as_str());
-                            return Ok(all_results);
-                        }  // 如果失败，返回错误
+                            let contents_gbk = match fs::read(&path) {
+                                Ok(bytes) => {
+                                    let (cow, _, _) = GBK.decode(&bytes);
+                                    cow.into_owned()
+                                },
+                                Err(_) => {
+                                    self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", &path.to_string_lossy()).as_str());
+                                    return Ok(all_results);// 如果失败，返回错误
+                                }
+                            };
+                            contents_gbk
+                        }  
                     };
                     all_results.extend(self.search_in_file_contents(&regex_list, &contents, &path, &self.strip_base_dir(base_dir, &path)));
                 }
@@ -500,14 +515,27 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             
             // 创建窗口
             nwg::Window::builder()
-                .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)  // 窗口属性
+                .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE | nwg::WindowFlags::MINIMIZE_BOX | nwg::WindowFlags::MAXIMIZE_BOX | nwg::WindowFlags::RESIZABLE)  // 窗口属性
                 .size((1100, 1000))  // 窗口大小
                 .position((150, 80))  // 窗口位置
                 .accept_files(true)
                 //.center(true)
-                .title("日志敏感信息查询 by nekous v1.2")  // 窗口标题
+                .title("日志敏感信息查询 by nekous v1.21")  // 窗口标题
                 //.maximized(true)
                 .build(&mut data.window)?;  // 构建窗口并处理错误
+
+            // 初始化菜单和菜单项
+            nwg::MenuItem::builder()
+                .text("更新日志")
+                .parent(&data.window)
+                .build(&mut data.menu_update)?;
+
+            nwg::MenuItem::builder()
+                .text("关于")
+                .parent(&data.window)
+                .build(&mut data.menu_about)?;
+
+
 
             // 添加输入框和按钮
             nwg::TextInput::builder()
@@ -665,18 +693,25 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                     match evt {
                         E::OnButtonClick => {
                             if &handle == &ui.browse_button.handle {
-                                ui.open_file_dialog(&handle);  // 调用打开文件对话框的方法
-                            } else if &handle == &ui.check_button{
+                                ui.open_file_dialog(&handle);
+                            } else if &handle == &ui.check_button {
                                 ui.begin_check();
-                            } else if &handle == &ui.clear_button{
+                            } else if &handle == &ui.clear_button {
                                 ui.clear_list_view();
-                            }else {
-                                ui.handle_button_click(&handle);  // 处理其他按钮点击事件
+                            } else {
+                                ui.handle_button_click(&handle);
                             }
                         },
-                        E::OnWindowClose => exit(1),
+                        E::OnWindowClose => std::process::exit(1),
                         E::OnListViewRightClick => ui.tmp(&handle),
-                        E::OnListViewClick  => ui.path_copy(&handle),
+                        E::OnListViewClick => ui.path_copy(&handle),
+                        E::OnMenuItemSelected => {
+                            if &handle == &ui.menu_about {
+                                nwg::simple_message("关于", "没有关于");
+                            } else if &handle == &ui.menu_update {
+                                nwg::simple_message("更新日志", "1.3\n1. 增加了对gbk格式文件的支持\n2. 调整了默认规则候选框\n3. 优化了UI界面");
+                            }
+                        },
                         _ => {}
                     }
                 }
@@ -756,3 +791,4 @@ fn main() {
     nwg::dispatch_thread_events();  // 启动事件循环
     
 }
+
