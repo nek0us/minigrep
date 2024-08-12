@@ -5,11 +5,11 @@ use minigrep::Config;
 use std::fs;
 extern crate native_windows_gui as nwg;  // 将 `native_windows_gui` 库引入并重命名为 `nwg`
 use nwg::NativeUi;
-use clipboard_win::{Clipboard, formats,set_clipboard};
+use clipboard_win::{formats,set_clipboard};
 use std::path::Path;
 
 use zip::read::ZipArchive;
-use std::io::{self, Read, Seek,Cursor};
+use std::io::{Read, Seek,Cursor};
 use encoding_rs::GBK;
 use flate2::read::GzDecoder;
 use std::str::from_utf8;
@@ -42,8 +42,7 @@ impl FeatureLayout {
                 self.list_box.push(r"[a-zA-Z0-9\*]+\@[a-zA-Z0-9]+\.[a-zA-Z]+".to_string());
                 self.list_box.push(r"(?<!\d)(\d{17}[Xx]|\d{18})(?!\d)".to_string());
                 self.list_box.push("((P|p)ass(P|p)ort((N|n)o(s|S)?)?(\\s)?\"?(\\s)?\\:(\\s)?(\\[)?\"?[a-zA-Z0-9]+\"?[,;]+)".to_string()); //|((P|p)ass(P|p)ort((N|n)o)?\\:(\\t)?[a-zA-Z0-9]+)
-                self.list_box.push("(C|c)ertificate".to_string());
-                self.list_box.push("(I|i)(D|d)_?(C|c)ard".to_string());
+                
             },
             1 => {  
                 self.list_box.push(r"passwd|password|PASSWORD|PASSWD|PassWd|PassWD|PassWord".to_string());
@@ -53,6 +52,8 @@ impl FeatureLayout {
                 self.list_box.push(r"access_token".to_string());
                 self.list_box.push("(T|t)oken\\\"\\:\t".to_string());
                 self.list_box.push("(S|s)ecret\\\"\\:\t".to_string());
+                self.list_box.push("(C|c)ertificate".to_string());
+                self.list_box.push("(I|i)(D|d)_?(C|c)ard".to_string());
             },
             _ => {}  // 其他列表框可以在这里添加其他默认元素
         }
@@ -72,7 +73,6 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     check_button: nwg::Button,
     clear_button: nwg::Button,
     list_view: nwg::ListView,
-    tis: nwg::Label,
     dyn_tis: nwg::Label,
 
     menu_update: nwg::MenuItem,
@@ -204,9 +204,25 @@ impl BasicApp {
                     let cursor = Cursor::new(nested_contents);
                     all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
                 } else {
-                    let mut contents = String::new();
-                    file.read_to_string(&mut contents)?;
-                    all_results.extend(self.search_in_file_contents(&regex_list, &contents, Path::new(&relative_path), &relative_path));
+                    let mut contents = Vec::new();
+                    let contents_str = match file.read_to_end(&mut contents) {
+                        Ok(_) => match String::from_utf8(contents.clone()) {
+                            Ok(c) => c,
+                            Err(_) => {
+                                let (cow, _, had_errors) = GBK.decode(&contents);
+                                if had_errors {
+                                    self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", &relative_path).as_str());
+                                    continue; // 跳过此文件
+                                }
+                                cow.into_owned()
+                            }
+                        },
+                        Err(_) => {
+                            self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", &relative_path).as_str());
+                            continue; // 跳过此文件
+                        }
+                    };
+                    all_results.extend(self.search_in_file_contents(&regex_list, &contents_str, Path::new(&relative_path), &relative_path));
                 }
             }
         }
@@ -228,13 +244,13 @@ impl BasicApp {
             }
         }
         // 假设.gz文件可能是.tar.gz
-        if gz_path.extension().and_then(std::ffi::OsStr::to_str) == Some("tar.gz") {
+        if gz_path.file_name().and_then(|name| name.to_str()).map_or(false, |name| name.ends_with(".tar.gz")) {
             let cursor = Cursor::new(&decompressed_data);
             return self.process_tar_bytes(regex_list, cursor, gz_path, base_dir);
         }
         let cursor = Cursor::new(&decompressed_data);
         // 进一步检查解压后的文件类型
-        let mut archive = ZipArchive::new(cursor.clone());
+        let archive = ZipArchive::new(cursor.clone());
         if archive.is_ok() {
             return self.process_zip_file(regex_list, cursor, gz_path, base_dir);
         }
@@ -247,16 +263,20 @@ impl BasicApp {
             return self.process_gz_file(regex_list, nested_cursor, gz_path, base_dir);
         }
     
-        let contents = match String::from_utf8(decompressed_data) {
+        let contents_str = match String::from_utf8(decompressed_data.clone()) {
             Ok(c) => c,
             Err(_) => {
-                self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", gz_path.to_string_lossy()).as_str());
-                return Ok(all_results);
+                let (cow, _, had_errors) = GBK.decode(&decompressed_data);
+                if had_errors {
+                    self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", gz_path.to_string_lossy()).as_str());
+                    return Ok(all_results);
+                }
+                cow.into_owned()
             }
         };
     
         let relative_path = self.strip_base_dir(base_dir, gz_path);
-        all_results.extend(self.search_in_file_contents(&regex_list, &contents, gz_path, &relative_path));
+        all_results.extend(self.search_in_file_contents(&regex_list, &contents_str, gz_path, &relative_path));
     
         Ok(all_results)
     }
@@ -292,7 +312,7 @@ impl BasicApp {
             let mut contents = vec![0; size];
             reader.read_exact(&mut contents)?;
     
-            let mut relative_path = format!("{}/{}", self.strip_base_dir(base_dir, tar_path), file_name);
+            let relative_path = format!("{}/{}", self.strip_base_dir(base_dir, tar_path), file_name);
     
             if file_name.ends_with(".tar") {
                 let cursor = Cursor::new(contents);
@@ -307,8 +327,18 @@ impl BasicApp {
                 let cursor = Cursor::new(contents);
                 all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
             } else {
-                let contents_str = from_utf8(&contents).unwrap_or("");
-                all_results.extend(self.search_in_file_contents(&regex_list, contents_str, Path::new(&relative_path), &relative_path));
+                let contents_str = match String::from_utf8(contents.clone()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let (cow, _, had_errors) = GBK.decode(&contents);
+                        if had_errors {
+                            self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", tar_path.to_string_lossy()).as_str());
+                            continue;
+                        }
+                        cow.into_owned()
+                    }
+                };
+                all_results.extend(self.search_in_file_contents(&regex_list, &contents_str, Path::new(&relative_path), &relative_path));
             }
     
             let remainder = 512 - (size % 512);
@@ -374,6 +404,7 @@ impl BasicApp {
             self.path_input_text.set_text("请输入日志目录");
             return
         }
+        self.dyn_tis.set_text("搜索中...");
         let regex_list: Vec<String> = self.get_check_regex_list();
         let all_results = self.get_all_file(regex_list, directory);
         match all_results {
@@ -402,6 +433,9 @@ impl BasicApp {
                 }
             },
             _ => { self.dyn_tis.set_text("该目录或文件中有文件内容为非文本内容，筛查失败，请检查后再试") }
+        }
+        if self.dyn_tis.text() == "搜索中..." {
+            self.dyn_tis.set_text("搜索完成");
         }
     }
 
@@ -497,7 +531,6 @@ impl BasicApp {
 
 mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
     use super::*; 
-    use std::process::exit;
     // 引入上级作用域中的所有项
     use std::rc::Rc;  // 使用 Rc 用于引用计数的智能指针
     use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
@@ -516,7 +549,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             // 创建窗口
             nwg::Window::builder()
                 .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE | nwg::WindowFlags::MINIMIZE_BOX | nwg::WindowFlags::MAXIMIZE_BOX | nwg::WindowFlags::RESIZABLE)  // 窗口属性
-                .size((1100, 1000))  // 窗口大小
+                .size((1100, 800))  // 窗口大小
                 .position((150, 80))  // 窗口位置
                 .accept_files(true)
                 //.center(true)
@@ -531,7 +564,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .build(&mut data.menu_update)?;
 
             nwg::MenuItem::builder()
-                .text("关于")
+                .text("关于&注意事项")
                 .parent(&data.window)
                 .build(&mut data.menu_about)?;
 
@@ -567,17 +600,11 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
 
             nwg::Label::builder()
                 .parent(&data.window)
-                .text("注意:本工具不能完全代替日志筛查,仅能用来筛查敏感信息\n日志问题还包括行为记录不足,并可能存在遗漏,请手动排查\n划选多个文件为选择该目录，等同选取该目录下所有文件\n右键点击id即可复制匹配值，左键点击复制文件名路径\n新增压缩包扫描 7z除外")
-                .build(&mut data.tis)
-                .expect("文字展示出错");
-
-            nwg::Label::builder()
-                .parent(&data.window)
-                .text("这里是提示框\n1. 移除通用ip匹配，请手动添加伪造ip \n2. 修复gz扫描，优化文件名显示")
+                .text("这里是提示框")
                 .build(&mut data.dyn_tis)
                 .expect("动态文字展示出错");
 
-            nwg::FileDialog::builder()
+            let _ = nwg::FileDialog::builder()
                 .title("Hello")
                 .action(nwg::FileDialogAction::Open)
                 .multiselect(true)
@@ -617,11 +644,11 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 }
                 
             };
-            let ena = data.list_view.enabled();
+            data.list_view.enabled();
 
 
 
-            let layout_list = vec!["身份信息(手机号，邮箱，证件号)","密钥token"].into_iter();
+            let layout_list = vec!["规则匹配","关键字匹配"].into_iter();
             data.features = layout_list.enumerate().map(|(index,_name)| FeatureLayout {
                 id:index ,
                 list_box: Default::default(),
@@ -633,7 +660,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 // regex_checkbox: Default::default(),
                 divider: Default::default(),
             }).collect::<Vec<_>>();
-            let layout_list = vec!["身份信息(手机号，邮箱，证件号)","密钥token"].into_iter();
+            let layout_list = vec!["规则匹配","关键字匹配"].into_iter();
             for (index,x) in layout_list.enumerate() {
                 // data.features[index].name = x.clone();
 
@@ -707,9 +734,9 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                         E::OnListViewClick => ui.path_copy(&handle),
                         E::OnMenuItemSelected => {
                             if &handle == &ui.menu_about {
-                                nwg::simple_message("关于", "没有关于");
+                                nwg::simple_message("关于&注意事项", "注意:\n1. 本工具不能完全代替日志筛查,仅能用来筛查敏感信息\n2. 日志问题还包括行为记录不足,并可能存在遗漏,请手动排查\n3. 划选多个文件为选择该目录，等同选取该目录下所有文件\n4. 右键点击id即可复制匹配值，左键点击复制文件名路径\n5. 新增压缩包扫描 7z除外");
                             } else if &handle == &ui.menu_update {
-                                nwg::simple_message("更新日志", "1.3\n1. 增加了对gbk格式文件的支持\n2. 调整了默认规则候选框\n3. 优化了UI界面");
+                                nwg::simple_message("更新日志", "version 1.3\n1. 增加了对gbk格式文件的支持\n2. 调整了默认规则候选框\n3. 优化了UI界面");
                             }
                         },
                         _ => {}
@@ -748,13 +775,13 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 x.initialize_defaults();
             
             }
-            tmp = tmp.child_item(nwg::GridLayoutItem::new(&ui.dyn_tis, col_num, row_num , 2, 2))
-                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text, col_num, row_num + 2, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 2, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 3, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 3, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.tis, col_num, row_num + 5, 2, 2))
-                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 0, 2, 21));
+            tmp = tmp.child_item(nwg::GridLayoutItem::new(&ui.dyn_tis, col_num, row_num-1 , 2, 2))
+                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text, col_num, row_num + 1, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 1, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 2, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 2, 1, 1))
+                //.child_item(nwg::GridLayoutItem::new(&ui.tis, col_num, row_num + 5, 2, 2))
+                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 0, 2, 17));
 
             tmp.build(&ui.layout)?;
 
