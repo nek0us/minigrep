@@ -2,6 +2,7 @@
 
 use std::{error::Error, path::PathBuf, vec};
 use minigrep::Config;
+mod text;
 use std::fs;
 extern crate native_windows_gui as nwg;  // 将 `native_windows_gui` 库引入并重命名为 `nwg`
 use nwg::NativeUi;
@@ -27,6 +28,7 @@ pub struct  FeatureLayout {
     list_box: nwg::ListBox<String>,
     input_text: nwg::TextInput,
     add_button: nwg::Button,
+    save_button: nwg::Button, // 新增修改保存按钮
     remove_button: nwg::Button,
     clear_button: nwg::Button,
     able_checkbox: nwg::CheckBox,
@@ -81,6 +83,43 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
 }
 
 impl BasicApp {
+
+    fn adjust_list_view_columns(&self) {
+        let total_width = self.list_view.size().0;
+        let id_col_width = (total_width as f32 * 0.10) as i32; // 10%
+        let value_col_width = (total_width as f32 * 0.30) as i32; // 30%
+        let file_col_width = total_width - id_col_width as u32 as u32 - value_col_width as u32; // 剩余宽度
+
+        self.list_view.set_column_width(0, id_col_width as isize);
+        self.list_view.set_column_width(1, value_col_width as isize);
+        self.list_view.set_column_width(2, file_col_width as isize);
+    }
+
+    fn handle_list_box_select(&self, list_box_handle: &nwg::ControlHandle) {
+        for feature in &self.features {
+            if list_box_handle == &feature.list_box.handle {
+                if let Some(selected) = feature.list_box.selection() {
+                    let selected_text = feature.list_box.collection()[selected].clone();
+                    feature.input_text.set_text(&selected_text);
+                    feature.input_text.set_focus();
+                }
+            }
+        }
+    }
+
+    fn save_edited_item(&self, feature_id: usize) {
+        let feature = &self.features[feature_id];
+        if let Some(selected) = feature.list_box.selection() {
+            let edited_text = feature.input_text.text();
+            let mut collection = feature.list_box.collection().clone(); // 获取并克隆当前的集合
+            collection[selected] = edited_text.clone(); // 更新集合中的值
+            feature.list_box.set_collection(collection); // 设置更新后的集合
+            feature.input_text.set_text("");
+        }
+    }
+    
+
+
     fn handle_button_click(&self, button_handle: &nwg::ControlHandle) {
         for feature in &self.features {
             if button_handle == &feature.add_button.handle {
@@ -89,6 +128,8 @@ impl BasicApp {
                 self.remove_item(feature.id);
             } else if button_handle == &feature.clear_button.handle {
                 self.clear_item(feature.id);
+            } else if button_handle == &feature.save_button {
+                self.save_edited_item(feature.id);
             }
         }
         
@@ -494,26 +535,33 @@ impl BasicApp {
         }
     }
     
-    fn tmp(&self,handle: &nwg::ControlHandle) {
+    
+    fn value_copy(&self,handle: &nwg::ControlHandle) {
         if let Some(index) = self.list_view.selected_item() {
             if let Some(item1) = self.list_view.item(index,1,100) {
                 if let Some(item2) = self.list_view.item(index,2,100) {
                     // let text = item1.text + " " + item2.text.as_str();
-                    if let Err(e) = set_clipboard(formats::Unicode, item1.text){
+                    if let Err(e) = set_clipboard(formats::Unicode, item1.text.clone()){
 
+                    } else {
+                        self.dyn_tis.set_text(format!("已复制内容: {}",&item1.text.to_string()).as_str());
                     };
                 }
             }
         }
         
+        
     }
+
     fn path_copy(&self,handle: &nwg::ControlHandle) {
         if let Some(index) = self.list_view.selected_item() {
             if let Some(item1) = self.list_view.item(index,1,100) {
                 if let Some(item2) = self.list_view.item(index,2,100) {
                     // let text = item1.text + " " + item2.text.as_str();
-                    if let Err(e) = set_clipboard(formats::Unicode, item2.text){
+                    if let Err(e) = set_clipboard(formats::Unicode, item2.text.clone()){
 
+                    } else {
+                        self.dyn_tis.set_text(format!("已复制路径: {}",&item2.text.to_string()).as_str());
                     };
                 }
             }
@@ -553,7 +601,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .position((150, 80))  // 窗口位置
                 .accept_files(true)
                 //.center(true)
-                .title("日志敏感信息查询 by nekous v1.21")  // 窗口标题
+                .title(text::TITLE)  // 窗口标题
                 //.maximized(true)
                 .build(&mut data.window)?;  // 构建窗口并处理错误
 
@@ -564,7 +612,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .build(&mut data.menu_update)?;
 
             nwg::MenuItem::builder()
-                .text("关于&注意事项")
+                .text("关于|注意事项")
                 .parent(&data.window)
                 .build(&mut data.menu_about)?;
 
@@ -654,6 +702,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 list_box: Default::default(),
                 input_text: Default::default(),
                 add_button: Default::default(),
+                save_button: Default::default(),
                 remove_button: Default::default(),
                 clear_button: Default::default(),
                 able_checkbox: Default::default(),
@@ -676,6 +725,11 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                     .text("添加")
                     .parent(&data.window)
                     .build(&mut data.features[index].add_button)?;
+
+                nwg::Button::builder()
+                    .text("修改保存")
+                    .parent(&data.window)
+                    .build(&mut data.features[index].save_button)?;
 
                 // Remove button setup
                 nwg::Button::builder()
@@ -727,17 +781,21 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 ui.clear_list_view();
                             } else {
                                 ui.handle_button_click(&handle);
-                            }
+                            }// 处理保存按钮点击
                         },
                         E::OnWindowClose => std::process::exit(1),
-                        E::OnListViewRightClick => ui.tmp(&handle),
+                        E::OnListViewRightClick => ui.value_copy(&handle),
                         E::OnListViewClick => ui.path_copy(&handle),
                         E::OnMenuItemSelected => {
                             if &handle == &ui.menu_about {
-                                nwg::simple_message("关于&注意事项", "注意:\n1. 本工具不能完全代替日志筛查,仅能用来筛查敏感信息\n2. 日志问题还包括行为记录不足,并可能存在遗漏,请手动排查\n3. 划选多个文件为选择该目录，等同选取该目录下所有文件\n4. 右键点击id即可复制匹配值，左键点击复制文件名路径\n5. 新增压缩包扫描 7z除外");
+                                nwg::simple_message("关于&注意事项", text::ABOUT_TEXT);
                             } else if &handle == &ui.menu_update {
-                                nwg::simple_message("更新日志", "version 1.3\n1. 增加了对gbk格式文件的支持\n2. 调整了默认规则候选框\n3. 优化了UI界面");
+                                nwg::simple_message("更新日志", text::UPDATE_LOG);
                             }
+                        },
+                        E::OnListBoxSelect => ui.handle_list_box_select(&handle),
+                        E::OnResize => {
+                            ui.adjust_list_view_columns();
                         },
                         _ => {}
                     }
@@ -767,8 +825,9 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                     // .child_item(nwg::GridLayoutItem::new(&x.regex_checkbox, col_num + 1, row_num + 1, 1, 1))
                     .child_item(nwg::GridLayoutItem::new(&x.input_text, col_num + 1, row_num + 1, 1, 1))
                     .child_item(nwg::GridLayoutItem::new(&x.add_button, col_num + 1, row_num + 2, 1, 1))
-                    .child_item(nwg::GridLayoutItem::new(&x.remove_button, col_num + 1, row_num + 3, 1, 1))
-                    .child_item(nwg::GridLayoutItem::new(&x.clear_button, col_num + 1, row_num + 4, 1, 1))
+                    .child_item(nwg::GridLayoutItem::new(&x.save_button, col_num + 1, row_num + 3, 1, 1)) // 新增保存按钮布局
+                    .child_item(nwg::GridLayoutItem::new(&x.remove_button, col_num + 1, row_num + 4, 1, 1))
+                    .child_item(nwg::GridLayoutItem::new(&x.clear_button, col_num + 1, row_num + 5, 1, 1))
                     .child_item(nwg::GridLayoutItem::new(&x.divider, col_num, row_num + 6, 2, 1));
                 row_num += 7;
                 col_index += 1;
