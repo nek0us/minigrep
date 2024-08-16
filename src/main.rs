@@ -84,6 +84,28 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
 
 impl BasicApp {
 
+    // 处理文件拖放事件
+    fn handle_file_drop(&self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+    
+        let path_str = if paths.len() == 1 {
+            paths[0].to_str().unwrap_or_default().to_string()
+        } else {
+            // 获取所有文件的公共目录
+            if let Some(common_dir) = paths[0].parent() {
+                common_dir.to_str().unwrap_or_default().to_string()
+            } else {
+                String::new()
+            }
+        };
+    
+        self.path_input_text.set_text(&path_str);
+    }
+    
+
+    // 保持展示窗口列比例
     fn adjust_list_view_columns(&self) {
         let total_width = self.list_view.size().0;
         let id_col_width = (total_width as f32 * 0.10) as i32; // 10%
@@ -95,6 +117,7 @@ impl BasicApp {
         self.list_view.set_column_width(2, file_col_width as isize);
     }
 
+    // 选择规则库列
     fn handle_list_box_select(&self, list_box_handle: &nwg::ControlHandle) {
         for feature in &self.features {
             if list_box_handle == &feature.list_box.handle {
@@ -107,6 +130,7 @@ impl BasicApp {
         }
     }
 
+    // 修改保存规则库列
     fn save_edited_item(&self, feature_id: usize) {
         let feature = &self.features[feature_id];
         if let Some(selected) = feature.list_box.selection() {
@@ -119,7 +143,7 @@ impl BasicApp {
     }
     
 
-
+    // 规则库按钮操作
     fn handle_button_click(&self, button_handle: &nwg::ControlHandle) {
         for feature in &self.features {
             if button_handle == &feature.add_button.handle {
@@ -135,6 +159,7 @@ impl BasicApp {
         
     }
 
+    // 获取规则库列表
     fn get_check_regex_list(&self) -> Vec<String> {
         self.features.iter()
         .filter(|feature| feature.able_checkbox.check_state() == nwg::CheckBoxState::Checked)
@@ -147,6 +172,7 @@ impl BasicApp {
         .collect()
     }
 
+    // 获取文件进行判断
     fn get_file(&self, regex_list: Vec<String>, path: PathBuf, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let mut all_results: Vec<MatchResult> = Vec::new(); // 用来存储所有匹配结果
         if path.is_file() {
@@ -192,6 +218,7 @@ impl BasicApp {
         Ok(all_results)
     }
     
+    // 从文件夹内获取文件
     fn get_file_by_dir(&self, regex_list: Vec<String>, path_dir: PathBuf, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let mut all_results: Vec<MatchResult> = Vec::new(); // 用来存储所有匹配结果
     
@@ -210,6 +237,7 @@ impl BasicApp {
         Ok(all_results)
     }
     
+    // 操作zip文件
     fn process_zip_file<R: Read + Seek>(&self, regex_list: &[String], reader: R, zip_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let mut all_results: Vec<MatchResult> = Vec::new();
         let mut archive = ZipArchive::new(reader)?;
@@ -271,8 +299,7 @@ impl BasicApp {
         Ok(all_results)
     }
     
-    
-
+    // 操作gz文件
     fn process_gz_file<R: Read>(&self, regex_list: &[String], reader: R, gz_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let mut all_results: Vec<MatchResult> = Vec::new();
         let mut decoder = GzDecoder::new(reader);
@@ -322,9 +349,7 @@ impl BasicApp {
         Ok(all_results)
     }
     
-    
-    
-
+    // 操作tar文件
     fn process_tar_bytes<R: Read>(&self, regex_list: &[String], mut reader: R, tar_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let mut all_results: Vec<MatchResult> = Vec::new();
         let mut buffer = [0; 512];
@@ -392,11 +417,13 @@ impl BasicApp {
         Ok(all_results)
     }
     
+    // 操作war文件
     fn process_war_file<R: Read + Seek>(&self, regex_list: &[String], reader: R, war_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         // WAR 文件本质上是 ZIP 文件，所以我们可以调用 process_zip_file
         self.process_zip_file(regex_list, reader, war_path, base_dir)
     }
 
+    // 搜索文件内容
     fn search_in_file_contents(&self, regex_list: &[String], contents: &str, path: &Path, file_name: &str) -> Vec<MatchResult> {
         let mut results = Vec::new();
         for query in regex_list {
@@ -423,7 +450,7 @@ impl BasicApp {
         results
     }
     
-
+    // 获取目录下所有文件
     fn get_all_file(&self, regex_list: Vec<String>, path_dir: String) -> Result<Vec<MatchResult>, Box<dyn Error>> {
             // let res = self.is_dir_or_file(regex_list, path_dir);
             let path = PathBuf::from(path_dir);
@@ -439,6 +466,7 @@ impl BasicApp {
             all_results
     }
 
+    // 检测按钮点击后
     fn begin_check(&self) {
         let directory = self.path_input_text.text();
         if directory.len() == 0 {
@@ -480,10 +508,12 @@ impl BasicApp {
         }
     }
 
+    // 清空展示列表
     fn clear_list_view(&self) {
         self.list_view.clear();
     }
 
+    // 添加按钮添加规则实例
     fn add_item(&self, feature_id: usize) {
         let feature = &self.features[feature_id];
         let text = feature.input_text.text();
@@ -493,6 +523,7 @@ impl BasicApp {
         }
     }
 
+    // 删除按钮删除规则实例
     fn remove_item(&self, feature_id: usize) {
         let feature = &self.features[feature_id];
         if let Some(selected) = feature.list_box.selection() {
@@ -500,11 +531,13 @@ impl BasicApp {
         }
     }
 
+    // 清除按钮清空规则库示例
     fn clear_item(&self, feature_id: usize) {
         let feature = &self.features[feature_id];
         feature.list_box.clear();
     }
 
+    // 打开资源管理器载入检索路径
     fn open_file_dialog(&self, handle: &nwg::ControlHandle) {
         let mut c = String::new();
         if self.filedialog.run(Some(handle)) {
@@ -536,6 +569,7 @@ impl BasicApp {
     }
     
     
+    // 复制参数
     fn value_copy(&self,handle: &nwg::ControlHandle) {
         if let Some(index) = self.list_view.selected_item() {
             if let Some(item1) = self.list_view.item(index,1,100) {
@@ -553,6 +587,7 @@ impl BasicApp {
         
     }
 
+    // 复制路径
     fn path_copy(&self,handle: &nwg::ControlHandle) {
         if let Some(index) = self.list_view.selected_item() {
             if let Some(item1) = self.list_view.item(index,1,100) {
@@ -568,6 +603,8 @@ impl BasicApp {
         }
         
     }
+
+    // 绝对路径变相对路径
     fn strip_base_dir(&self, base_dir: &Path, full_path: &Path) -> String {
         full_path.strip_prefix(base_dir)
             .unwrap_or(full_path)
@@ -582,8 +619,9 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
     // 引入上级作用域中的所有项
     use std::rc::Rc;  // 使用 Rc 用于引用计数的智能指针
     use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
-    use std::ops::Deref;  // 引入 Deref trait 用于自定义解引用行为
-    use nwg::CheckBoxState;
+    use std::ops::Deref;  use nwg::keys::_E;
+    // 引入 Deref trait 用于自定义解引用行为
+    use nwg::{CheckBoxState, DropFiles};
 
     pub struct BasicAppUi {  // 定义 UI 管理结构体
         inner: Rc<BasicApp>,  // 使用 Rc 封装 BasicApp，允许多处共享所有权
@@ -769,7 +807,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
 
             // 事件绑定
             let evt_ui = Rc::downgrade(&ui.inner);
-            let handle_events = move |evt, _evt_data, handle| {
+            let handle_events = move |evt, _evt_data:nwg::EventData, handle| {
                 if let Some(ui) = evt_ui.upgrade() {
                     match evt {
                         E::OnButtonClick => {
@@ -796,6 +834,12 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                         E::OnListBoxSelect => ui.handle_list_box_select(&handle),
                         E::OnResize => {
                             ui.adjust_list_view_columns();
+                        },
+                        E::OnFileDrop => {
+                            let files = _evt_data.on_file_drop().files().into_iter().map(PathBuf::from).collect();
+                            if let Some(ui) = evt_ui.upgrade() {
+                                ui.handle_file_drop(files);
+                            };
                         },
                         _ => {}
                     }
