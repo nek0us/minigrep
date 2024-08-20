@@ -15,6 +15,82 @@ use encoding_rs::GBK;
 use flate2::read::GzDecoder;
 use std::str::from_utf8;
  
+
+use serde::{Deserialize, Serialize};
+use serde_yaml;
+use dirs::home_dir;
+
+#[derive(Serialize, Deserialize)]
+struct RuleConfig {
+    name: String,
+    enabled: bool,
+    patterns: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct YamlConfig {
+    rules: Vec<RuleConfig>,
+}
+
+impl BasicApp {
+    // 获取配置文件路径
+    fn get_config_path(&self) -> PathBuf {
+        let mut config_path = home_dir().unwrap_or_else(|| PathBuf::from("."));
+        config_path.push("minigrepConfig.yaml");
+        config_path
+    }
+
+    // 加载配置文件
+    fn load_config(&self) -> Result<YamlConfig, Box<dyn Error>> {
+        let config_content = fs::read_to_string(self.get_config_path())?;
+        let config: YamlConfig = serde_yaml::from_str(&config_content)?;
+        Ok(config)
+    }
+
+    // 函数：收集当前 list_box 中的内容并生成配置文件
+    fn save_current_config(&self) -> Result<(), Box<dyn Error>> {
+        // 收集当前的配置
+        let mut rules = Vec::new();
+        for feature in &self.features {
+            let patterns: Vec<String> = feature.list_box.collection().to_vec();
+            let enabled = feature.able_checkbox.check_state() == nwg::CheckBoxState::Checked;
+            rules.push(RuleConfig {
+                name: format!("规则{}", feature.id),
+                enabled,
+                patterns,
+            });
+        }
+        let config = YamlConfig { rules };
+        let config_content = serde_yaml::to_string(&config)?;
+        fs::write(self.get_config_path(), config_content)?;
+        Ok(())
+    }
+    
+    // 按钮点击事件：生成配置文件
+    fn on_generate_config_click(&self) -> Result<(), Box<dyn Error>> {
+        self.save_current_config()
+    }
+
+
+    // 配置文件删除确认
+    fn confirm_delete_config(&self) -> bool {
+        // 弹出确认对话框
+        let params = nwg::MessageParams{
+            title: "确认删除",
+            content: "你确定要删除配置文件吗？",
+            icons: nwg::MessageIcons::Warning,
+            buttons: nwg::MessageButtons::YesNo,
+        };
+
+        let res = nwg::modal_message(&self.window, &params);
+        
+        // 检查用户选择
+        matches!(res, nwg::MessageChoice::Yes)
+    }
+    
+    
+}
+
 struct MatchResult {
     matched_text: String,
     file_name: String,
@@ -79,10 +155,47 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
 
     menu_update: nwg::MenuItem,
     menu_about: nwg::MenuItem,
+    menu_generate_config: nwg::MenuItem,
+    menu_delete_config_button: nwg::MenuItem,
+    menu_reset_to_default_button: nwg::MenuItem,
 
 }
 
 impl BasicApp {
+
+    fn initialize_defaults(&self) {
+        // 首先检查配置文件是否存在
+        let config_path = self.get_config_path();
+        if config_path.exists() {
+            match self.load_config() {
+                Ok(config) => {
+                    for (i, rule) in config.rules.iter().enumerate() {
+                        if i < self.features.len() {
+                            let feature = &self.features[i];
+                            feature.list_box.clear();
+                            feature.able_checkbox.set_check_state(
+                                if rule.enabled {
+                                    nwg::CheckBoxState::Checked
+                                } else {
+                                    nwg::CheckBoxState::Unchecked
+                                }
+                            );
+                            for pattern in &rule.patterns {
+                                feature.list_box.push(pattern.clone());
+                            }
+                        }
+                    }
+                    return;
+                },
+                Err(e) => {
+                    eprintln!("Failed to load config file: {}", e);
+                }
+            }
+        }
+
+        // 如果加载失败或文件不存在，则加载默认配置，因为后面已有实现，所以不管了
+        
+    }
 
     // 处理文件拖放事件
     fn handle_file_drop(&self, paths: Vec<PathBuf>) {
@@ -654,7 +767,20 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .parent(&data.window)
                 .build(&mut data.menu_about)?;
 
+            nwg::MenuItem::builder()
+                .text("生成/更新配置文件")
+                .parent(&data.window)
+                .build(&mut data.menu_generate_config)?;
 
+            nwg::MenuItem::builder()
+                .text("删除配置文件")
+                .parent(&data.window)
+                .build(&mut data.menu_delete_config_button)?;
+            
+            nwg::MenuItem::builder()
+                .text("重置为默认规则")
+                .parent(&data.window)
+                .build(&mut data.menu_reset_to_default_button)?;
 
             // 添加输入框和按钮
             nwg::TextInput::builder()
@@ -825,10 +951,35 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                         E::OnListViewRightClick => ui.value_copy(&handle),
                         E::OnListViewClick => ui.path_copy(&handle),
                         E::OnMenuItemSelected => {
-                            if &handle == &ui.menu_about {
+                            if &handle == &ui.menu_about { // 关于按钮
                                 nwg::simple_message("关于&注意事项", text::ABOUT_TEXT);
-                            } else if &handle == &ui.menu_update {
+                            } else if &handle == &ui.menu_update { // 更新日志
                                 nwg::simple_message("更新日志", text::UPDATE_LOG);
+                            } else if &handle == &ui.menu_generate_config {  // 生成日志文件
+                                if let Err(e) = ui.on_generate_config_click() {
+                                    nwg::simple_message("错误", &format!("生成配置文件失败: {}", e));
+                                } else {
+                                    nwg::simple_message("成功", "配置文件已生成并更新");
+                                }
+                            }else if &handle == &ui.menu_delete_config_button {  // 删除配置文件菜单按钮
+                                let config_path = ui.get_config_path();
+                                if config_path.exists() {
+                                    if ui.confirm_delete_config() {  // 显示确认弹窗
+                                        if let Err(e) = fs::remove_file(&config_path) {
+                                            nwg::simple_message("错误", &format!("删除配置文件失败: {}", e));
+                                        } else {
+                                            nwg::simple_message("成功", "配置文件已删除");
+                                        }
+                                    }
+                                } else {
+                                    nwg::simple_message("错误", "配置文件不存在");
+                                }
+                            } else if &handle == &ui.menu_reset_to_default_button { // 重置规则库
+                                for feature in &ui.features {
+                                    feature.list_box.clear();
+                                    feature.initialize_defaults();
+                                }
+                                nwg::simple_message("成功", "规则已重置为默认值");
                             }
                         },
                         E::OnListBoxSelect => ui.handle_list_box_select(&handle),
@@ -845,6 +996,8 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                     }
                 }
             };
+
+            
 
            *ui.default_handler.borrow_mut() = Some(nwg::full_bind_event_handler(&ui.window.handle, handle_events));
 
@@ -885,6 +1038,8 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 2, 1, 1))
                 //.child_item(nwg::GridLayoutItem::new(&ui.tis, col_num, row_num + 5, 2, 2))
                 .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 0, 2, 17));
+
+            ui.inner.initialize_defaults();
 
             tmp.build(&ui.layout)?;
 
