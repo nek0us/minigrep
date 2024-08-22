@@ -19,7 +19,7 @@ pub fn run(config: Config) -> Result<Vec<(String, String, String)>, Box<dyn Erro
 pub fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String, String)>, Box<dyn Error>> {
     let regex = Regex::new(query)?;
     let mut matches = vec![];
-
+    let lines: Vec<&str> = contents.lines().collect();
     for (index, line) in contents.lines().enumerate() {
         if let Some(caps) = regex.captures(line.as_bytes())? {
             if let Some(m) = caps.get(0) { // 获取第一个捕获组
@@ -92,7 +92,17 @@ pub fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String,
                 let end = m.end();
                 // 根据捕获的起始和结束位置获取匹配的字符串
                 let match_str = String::from_utf8_lossy(&line.as_bytes()[start..end]).to_string();
-                matches.push(((index + 1).to_string(), match_str, line.clone().to_string()));
+
+                // 获取上一行和下一行
+                let prev_line = if index > 0 { lines[index - 1] } else { "" };
+                let next_line = if index < lines.len() - 1 { lines[index + 1] } else { "" };
+                let combined_text = format!(
+                    "{}\r\n{}\r\n{}",
+                    prev_line,
+                    line,
+                    next_line
+                );
+                matches.push(((index + 1).to_string(), match_str, combined_text));
             }
         }
     }

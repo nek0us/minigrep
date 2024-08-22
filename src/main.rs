@@ -35,27 +35,15 @@ struct YamlConfig {
 }
 
 impl BasicApp {
-
+    // 重置为默认日志规则
     fn reset_to_default_log_rules(&self) {
         self.load_rules_from_text(text::LOG_RULES);
     }
-
+    // 重置为默认发布包规则
     fn reset_to_default_package_rules(&self) {
         self.load_rules_from_text(text::PACKAGE_RULES);
     }
-
-    fn switch_to_log_rules_from_config(&self) -> Result<(), Box<dyn Error>> {
-        let config = self.load_config()?;
-        self.load_rules_from_config(&config, "日志规则库");
-        Ok(())
-    }
-
-    fn switch_to_package_rules_from_config(&self) -> Result<(), Box<dyn Error>> {
-        let config = self.load_config()?;
-        self.load_rules_from_config(&config, "发布包规则库");
-        Ok(())
-    }
-
+    // 重置默认规则根据来源
     fn load_rules_from_text(&self, rules: &[(&str, &[&str])]) {
         for (i, &(_, patterns)) in rules.iter().enumerate() {
             if i < self.features.len() {
@@ -68,31 +56,11 @@ impl BasicApp {
         }
     }
 
-    fn load_rules_from_config(&self, config: &YamlConfig, rule_set_name: &str) {
-        for rule_config in &config.rules {
-            if rule_config.name == rule_set_name {
-                for (i, feature) in self.features.iter().enumerate() {
-                    feature.list_box.clear();
-                    for pattern in &rule_config.patterns {
-                        feature.list_box.push(pattern.clone());
-                    }
-                    feature.able_checkbox.set_check_state(
-                        if rule_config.enabled {
-                            nwg::CheckBoxState::Checked
-                        } else {
-                            nwg::CheckBoxState::Unchecked
-                        }
-                    );
-                }
-            }
-        }
-    }
-
     // 获取配置文件路径
     fn on_generate_config_click(&self) -> Result<(), Box<dyn Error>> {
         self.save_current_config()
     }
-
+    // 保存当前规则为配置文件
     fn save_current_config(&self) -> Result<(), Box<dyn Error>> {
         let mut rules = Vec::new();
         for feature in &self.features {
@@ -109,19 +77,20 @@ impl BasicApp {
         fs::write(self.get_config_path(), config_content)?;
         Ok(())
     }
-
+    // 获取配置文件内容
     fn load_config(&self) -> Result<YamlConfig, Box<dyn Error>> {
-        let config_content = fs::read_to_string(self.get_config_path())?;
+        let path = self.get_config_path();
+        let config_content = fs::read_to_string(path)?;
         let config: YamlConfig = serde_yaml::from_str(&config_content)?;
         Ok(config)
     }
-
+    // 获取配置文件路径
     fn get_config_path(&self) -> PathBuf {
         let mut config_path = home_dir().unwrap_or_else(|| PathBuf::from("."));
         config_path.push("minigrepConfig.yaml");
         config_path
     }
-
+    // 删除配置文件
     fn confirm_delete_config(&self) -> bool {
         let params = nwg::MessageParams {
             title: "确认删除",
@@ -172,7 +141,7 @@ impl FeatureLayout {
                     self.list_box.push(pattern.to_string());
                 }
             },
-            _ => {}  // 其他列表框可以在这里添加其他默认元素
+            _ => {}  
         }
     }
 }
@@ -196,9 +165,7 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     menu_about: nwg::MenuItem,
     menu_generate_config: nwg::MenuItem,
     menu_delete_config_button: nwg::MenuItem,
-    //menu_reset_to_default_button: nwg::MenuItem,
-    // menu_switch_log: nwg::MenuItem,
-    // menu_switch_package: nwg::MenuItem,
+    menu_switch_config: nwg::MenuItem,
     menu_reset_log: nwg::MenuItem,
     menu_reset_package: nwg::MenuItem,
 
@@ -210,29 +177,34 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
 
 impl BasicApp {
 
+    // 设置规则（从配置文件）
+    fn set_rules(&self,config: YamlConfig) {
+        for (i, rule) in config.rules.iter().enumerate() {
+            if i < self.features.len() {
+                let feature = &self.features[i];
+                feature.list_box.clear();
+                feature.able_checkbox.set_check_state(
+                    if rule.enabled {
+                        nwg::CheckBoxState::Checked
+                    } else {
+                        nwg::CheckBoxState::Unchecked
+                    }
+                );
+                for pattern in &rule.patterns {
+                    feature.list_box.push(pattern.clone());
+                }
+            }
+        }
+        return;
+    }
+
     fn initialize_defaults(&self) {
         // 首先检查配置文件是否存在
         let config_path = self.get_config_path();
         if config_path.exists() {
             match self.load_config() {
                 Ok(config) => {
-                    for (i, rule) in config.rules.iter().enumerate() {
-                        if i < self.features.len() {
-                            let feature = &self.features[i];
-                            feature.list_box.clear();
-                            feature.able_checkbox.set_check_state(
-                                if rule.enabled {
-                                    nwg::CheckBoxState::Checked
-                                } else {
-                                    nwg::CheckBoxState::Unchecked
-                                }
-                            );
-                            for pattern in &rule.patterns {
-                                feature.list_box.push(pattern.clone());
-                            }
-                        }
-                    }
-                    return;
+                    self.set_rules(config)
                 },
                 Err(e) => {
                     eprintln!("Failed to load config file: {}", e);
@@ -274,7 +246,7 @@ impl BasicApp {
 
         self.list_view.set_column_width(0, id_col_width as isize);
         self.list_view.set_column_width(1, value_col_width as isize);
-        self.list_view.set_column_width(3, file_col_width as isize);
+        self.list_view.set_column_width(2, file_col_width as isize);
     }
 
     // 选择规则库列
@@ -336,6 +308,12 @@ impl BasicApp {
     fn get_file(&self, regex_list: Vec<String>, path: PathBuf, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let mut all_results: Vec<MatchResult> = Vec::new(); // 用来存储所有匹配结果
         if path.is_file() {
+            // 检查文件扩展名是否为 .class，如果是则直接跳过
+            if let Some(extension) = path.extension() {
+                if extension == "class" {
+                    return Ok(all_results); // 跳过 .class 文件
+                }
+            }
             let file_extension = path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
             match file_extension {
                 "zip" => {
@@ -412,7 +390,12 @@ impl BasicApp {
                 let file_name_bytes = file.name_raw();
                 let (decoded_name, _, _) = GBK.decode(file_name_bytes);
                 let file_name = decoded_name.to_string();
-    
+                
+                // 跳过 .class 文件
+                if file_name.ends_with(".class") {
+                    continue;
+                }
+
                 let mut relative_path = self.strip_base_dir(base_dir, zip_path);
                 relative_path = format!("{}/{}", relative_path, file_name);  // Use relative path inside zip
     
@@ -492,6 +475,11 @@ impl BasicApp {
             return self.process_zip_file(regex_list, cursor, gz_path, base_dir);
         }
 
+        // 跳过 .class 文件
+        if gz_path.extension().and_then(|ext| ext.to_str()) == Some("class") {
+            return Ok(all_results);
+        }
+
         let cursor = Cursor::new(decompressed_data.clone());
         let mut decoder = GzDecoder::new(cursor);
         let mut nested_decompressed_data = Vec::new();
@@ -536,7 +524,12 @@ impl BasicApp {
             if file_name.is_empty() {
                 break;
             }
-    
+
+            // 跳过 .class 文件
+            if file_name.ends_with(".class") {
+                continue;
+            }
+
             let size_str = match from_utf8(&buffer[124..136]) {
                 Ok(size) => size.trim_matches(char::from(0)),
                 Err(_) => break,
@@ -605,7 +598,7 @@ impl BasicApp {
                 ignore_case: false,
             };
             if let Ok(matches) = minigrep::run(config) {
-                for (line_number, matched_text,origin_text) in matches {
+                for (line_number, matched_text, origin_text) in matches {
                     let display_file_name = if path.is_file() {
                         file_name.to_string()  // 直接使用文件名，不需要额外的路径信息
                     } else {
@@ -716,7 +709,7 @@ impl BasicApp {
                 let copy_storage = Rc::clone(&copy_storage);
                 let file_name_storage = Rc::clone(&file_name_storage);
                 move |evt, evt_data, _handle| {
-                    if let nwg::Event::OnListViewItemActivated = evt {
+                    if let nwg::Event::OnListViewClick = evt {
                         if let (index,_) = evt_data.on_list_view_item_index() {
                             // 验证索引是否有效，防止崩溃
                             if index < copy_storage.len() {
@@ -826,23 +819,6 @@ impl BasicApp {
 
 
 
-    // 复制路径
-    fn path_copy(&self,handle: &nwg::ControlHandle) {
-        if let Some(index) = self.list_view.selected_item() {
-            if let Some(item1) = self.list_view.item(index,1,100) {
-                if let Some(item2) = self.list_view.item(index,2,100) {
-                    // let text = item1.text + " " + item2.text.as_str();
-                    if let Err(e) = set_clipboard(formats::Unicode, item2.text.clone()){
-
-                    } else {
-                        self.dyn_tis.set_text(format!("已复制路径: {}",&item2.text.to_string()).as_str());
-                    };
-                }
-            }
-        }
-        
-    }
-
     // 绝对路径变相对路径
     fn strip_base_dir(&self, base_dir: &Path, full_path: &Path) -> String {
         full_path.strip_prefix(base_dir)
@@ -858,9 +834,9 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
     // 引入上级作用域中的所有项
     use std::rc::Rc;  // 使用 Rc 用于引用计数的智能指针
     use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
-    use std::ops::Deref;  use nwg::keys::_E;
+    use std::ops::Deref;  
     // 引入 Deref trait 用于自定义解引用行为
-    use nwg::{CheckBoxState, DropFiles};
+    use nwg::CheckBoxState;
 
     pub struct BasicAppUi {  // 定义 UI 管理结构体
         inner: Rc<BasicApp>,  // 使用 Rc 封装 BasicApp，允许多处共享所有权
@@ -903,25 +879,20 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .parent(&data.window)
                 .build(&mut data.menu_delete_config_button)?;
             
-                // nwg::MenuItem::builder()
-                //     .text("切换到日志配置")
-                //     .parent(&data.window)
-                //     .build(&mut data.menu_switch_log)?;
+                nwg::MenuItem::builder()
+                    .text("切换到配置文件")
+                    .parent(&data.window)
+                    .build(&mut data.menu_switch_config)?;
             
-                //     nwg::MenuItem::builder()
-                //         .text("切换到发布包配置")
-                //         .parent(&data.window)
-                //         .build(&mut data.menu_switch_package)?;
-            
-                        nwg::MenuItem::builder()
-                            .text("重置为默认日志规则")
-                            .parent(&data.window)
-                            .build(&mut data.menu_reset_log)?;
-            
-                            nwg::MenuItem::builder()
-                                .text("重置为默认发布包规则")
-                                .parent(&data.window)
-                                .build(&mut data.menu_reset_package)?;
+                nwg::MenuItem::builder()
+                    .text("重置为默认日志规则")
+                    .parent(&data.window)
+                    .build(&mut data.menu_reset_log)?;
+    
+                nwg::MenuItem::builder()
+                    .text("重置为默认发布包规则")
+                    .parent(&data.window)
+                    .build(&mut data.menu_reset_package)?;
 
             // 添加输入框和按钮
             nwg::TextInput::builder()
@@ -948,7 +919,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             data.origin_text = Rc::new(RefCell::new(nwg::TextBox::default()));
             nwg::TextBox::builder()
                 .parent(&data.window)
-                .text("此处展示所在行")  // 初始文本为空
+                .text("此处展示所在上下三行，所在行为中间那一行")  // 初始文本为空
                 .build(&mut data.origin_text.borrow_mut())?;
 
             data.origin_file = Rc::new(RefCell::new(nwg::TextInput::default()));
@@ -1103,7 +1074,6 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                         },
                         E::OnWindowClose => std::process::exit(1),
                         E::OnListViewRightClick => ui.match_copy(&handle),
-                        //E::OnListViewClick => ui.value_copy(&handle),
                         E::OnMenuItemSelected => {
                             if &handle == &ui.menu_about { // 关于按钮
                                 nwg::simple_message("关于&注意事项", text::ABOUT_TEXT);
@@ -1128,32 +1098,31 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 } else {
                                     nwg::simple_message("错误", "配置文件不存在");
                                 }
-                            // } else if &handle == &ui.menu_switch_log {
-                            //     if let Err(e) = ui.switch_to_log_rules_from_config() {
-                            //         nwg::simple_message("错误", &format!("切换日志配置失败: {}", e));
-                            //     }
-                            // } else if &handle == &ui.menu_switch_package {
-                            //     if let Err(e) = ui.switch_to_package_rules_from_config() {
-                            //         nwg::simple_message("错误", &format!("切换发布包配置失败: {}", e));
-                            //     }
-                            } else if &handle == &ui.menu_reset_log {
+                            } else if &handle == &ui.menu_switch_config { // 切换为配置文件日志规则
                                 for feature in &ui.features {
                                     feature.list_box.clear();
                                 }
-                                ui.reset_to_default_log_rules();
-                            } else if &handle == &ui.menu_reset_package {
+                                let res = ui.load_config();
+                                match res {
+                                    Ok(config) => {
+                                        ui.set_rules(config);
+                                    },
+                                    Err(e) => {
+                                        nwg::simple_message("错误", format!("配置文件可能不存在：{}",e).as_str());
+                                    }
+                                } 
+                                
+                            } else if &handle == &ui.menu_reset_log { // 重置为默认日志规则
+                                for feature in &ui.features {
+                                    feature.list_box.clear();
+                                }
+                                ui.reset_to_default_log_rules(); 
+                            } else if &handle == &ui.menu_reset_package {// 重置为默认发布包规则
                                 for feature in &ui.features {
                                     feature.list_box.clear();
                                 }
                                 ui.reset_to_default_package_rules();
                             }
-                            // else if &handle == &ui.menu_reset_to_default_button { // 重置规则库
-                            //     for feature in &ui.features {
-                            //         feature.list_box.clear();
-                            //         feature.initialize_defaults();
-                            //     }
-                            //     nwg::simple_message("成功", "规则已重置为默认值");
-                            // }
                         },
                         E::OnListBoxSelect => ui.handle_list_box_select(&handle),
                         E::OnResize => {
@@ -1209,9 +1178,9 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 1, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 2, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 2, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.origin_text.borrow().handle, col_num + 2, 0, 2, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.origin_file.borrow().handle, col_num + 2, 1, 2, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 2, 2, 15));
+                .child_item(nwg::GridLayoutItem::new(&ui.origin_text.borrow().handle, col_num + 2, 0, 2, 3))
+                .child_item(nwg::GridLayoutItem::new(&ui.origin_file.borrow().handle, col_num + 2, 3, 2, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 4, 2, 13));
 
             ui.inner.initialize_defaults();
 
