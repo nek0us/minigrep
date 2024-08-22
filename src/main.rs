@@ -299,6 +299,10 @@ impl BasicApp {
                     let file = fs::File::open(&path)?;
                     all_results.extend(self.process_war_file(&regex_list, file, &path, base_dir)?);
                 },
+                "jar" => {
+                    let file = fs::File::open(&path)?;
+                    all_results.extend(self.process_war_file(&regex_list, file, &path, base_dir)?);
+                },
                 "gz" => {
                     let file = fs::File::open(&path)?;
                     all_results.extend(self.process_gz_file(&regex_list, file, &path, base_dir)?);
@@ -381,6 +385,11 @@ impl BasicApp {
                     let cursor = Cursor::new(nested_contents);
                     all_results.extend(self.process_tar_bytes(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
                 } else if file_name.ends_with(".war") {
+                    let mut nested_contents = Vec::new();
+                    file.read_to_end(&mut nested_contents)?;
+                    let cursor = Cursor::new(nested_contents);
+                    all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
+                } else if file_name.ends_with(".jar") {
                     let mut nested_contents = Vec::new();
                     file.read_to_end(&mut nested_contents)?;
                     let cursor = Cursor::new(nested_contents);
@@ -505,6 +514,9 @@ impl BasicApp {
             } else if file_name.ends_with(".war") {
                 let cursor = Cursor::new(contents);
                 all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
+            } else if file_name.ends_with(".jar") {
+                let cursor = Cursor::new(contents);
+                all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
             } else {
                 let contents_str = match String::from_utf8(contents.clone()) {
                     Ok(c) => c,
@@ -530,7 +542,7 @@ impl BasicApp {
         Ok(all_results)
     }
     
-    // 操作war文件
+    // 操作war文件 jar也是
     fn process_war_file<R: Read + Seek>(&self, regex_list: &[String], reader: R, war_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         // WAR 文件本质上是 ZIP 文件，所以我们可以调用 process_zip_file
         self.process_zip_file(regex_list, reader, war_path, base_dir)
