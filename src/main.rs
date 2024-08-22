@@ -15,6 +15,8 @@ use encoding_rs::GBK;
 use flate2::read::GzDecoder;
 use std::str::from_utf8;
  
+use std::rc::Rc;
+use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
 
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -95,6 +97,7 @@ struct MatchResult {
     matched_text: String,
     file_name: String,
     line_number: String,
+    origin_text: String,
 }
 
 
@@ -158,6 +161,10 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     menu_generate_config: nwg::MenuItem,
     menu_delete_config_button: nwg::MenuItem,
     menu_reset_to_default_button: nwg::MenuItem,
+
+    event_handler: RefCell<Option<nwg::EventHandler>>,
+    origin_text: Rc<RefCell<nwg::TextBox>>,
+    origin_file: Rc<RefCell<nwg::TextInput>>,
 
 }
 
@@ -223,11 +230,11 @@ impl BasicApp {
         let total_width = self.list_view.size().0;
         let id_col_width = (total_width as f32 * 0.10) as i32; // 10%
         let value_col_width = (total_width as f32 * 0.30) as i32; // 30%
-        let file_col_width = total_width - id_col_width as u32 as u32 - value_col_width as u32; // 剩余宽度
+        let file_col_width = total_width - id_col_width as u32 - value_col_width as u32; // 剩余宽度
 
         self.list_view.set_column_width(0, id_col_width as isize);
         self.list_view.set_column_width(1, value_col_width as isize);
-        self.list_view.set_column_width(2, file_col_width as isize);
+        self.list_view.set_column_width(3, file_col_width as isize);
     }
 
     // 选择规则库列
@@ -558,7 +565,7 @@ impl BasicApp {
                 ignore_case: false,
             };
             if let Ok(matches) = minigrep::run(config) {
-                for (line_number, matched_text) in matches {
+                for (line_number, matched_text,origin_text) in matches {
                     let display_file_name = if path.is_file() {
                         file_name.to_string()  // 直接使用文件名，不需要额外的路径信息
                     } else {
@@ -568,6 +575,7 @@ impl BasicApp {
                         file_name: display_file_name,
                         line_number,
                         matched_text,
+                        origin_text
                     });
                 }
             }
@@ -591,46 +599,110 @@ impl BasicApp {
             all_results
     }
 
+    
     // 检测按钮点击后
     fn begin_check(&self) {
+        self.list_view.clear();
         let directory = self.path_input_text.text();
-        if directory.len() == 0 {
+        if directory.is_empty() {
             self.path_input_text.set_text("请输入日志目录");
-            return
+            return;
         }
         self.dyn_tis.set_text("搜索中...");
         let regex_list: Vec<String> = self.get_check_regex_list();
         let all_results = self.get_all_file(regex_list, directory);
         match all_results {
             Ok(all_res) => {
+                // 用于临时保存所有的完整文本
+                let mut full_text_storage: Vec<String> = Vec::new();
+                let mut file_name_storage: Vec<String> = Vec::new();
                 for result in all_res {
                     let list_view_num = self.list_view.len();
+                    
                     self.list_view.insert_item(nwg::InsertListViewItem {
                         column_index: 0,
                         text: Some(list_view_num.to_string()),
                         index: Some(list_view_num as i32),
                         image: None,
                     });
-        
+    
                     self.list_view.insert_item(nwg::InsertListViewItem {
                         column_index: 1,
-                        text: Some(result.matched_text),
+                        text: Some(result.matched_text.clone()),
                         index: Some(list_view_num as i32),
                         image: None,
                     });
+
+
                     self.list_view.insert_item(nwg::InsertListViewItem {
                         column_index: 2,
                         text: Some(format!("{} 第 {} 行", result.file_name, result.line_number)),
                         index: Some(list_view_num as i32),
                         image: None,
-                    });      
+                    });
+    
+                    // 保存完整的 `origin_text` 到临时存储中
+                    full_text_storage.push(result.origin_text.clone());
+                    file_name_storage.push(format!("{} 第 {} 行", result.file_name, result.line_number))
+                    
                 }
+                // 将完整文本存储到 `ListView` 的 `userdata` 中
+                self.bind_copy_event(full_text_storage,file_name_storage);
             },
             _ => { self.dyn_tis.set_text("该目录或文件中有文件内容为非文本内容，筛查失败，请检查后再试") }
         }
         if self.dyn_tis.text() == "搜索中..." {
             self.dyn_tis.set_text("搜索完成");
         }
+    }
+    
+    fn bind_copy_event(&self, full_text_storage: Vec<String>,file_names: Vec<String>) {
+        let copy_storage = Rc::new(full_text_storage);
+        let file_name_storage = Rc::new(file_names);
+        // 解除之前的事件处理器
+        if let Some(handler) = self.event_handler.borrow_mut().take() {
+            nwg::unbind_event_handler(&handler);
+        }
+        // 绑定 `ListView` 的激活事件来处理复制逻辑
+        let list_view_handle = &self.list_view.handle;
+        let window_handle = &self.window.handle;
+        let origin_text = Rc::clone(&self.origin_text);
+        let origin_file = Rc::clone(&self.origin_file);
+    
+        let new_handler = nwg::bind_event_handler(
+            list_view_handle,  // 控件句柄
+            window_handle,  // 父窗口句柄
+            {
+                let copy_storage = Rc::clone(&copy_storage);
+                let file_name_storage = Rc::clone(&file_name_storage);
+                move |evt, evt_data, _handle| {
+                    if let nwg::Event::OnListViewItemActivated = evt {
+                        if let (index,_) = evt_data.on_list_view_item_index() {
+                            // 验证索引是否有效，防止崩溃
+                            if index < copy_storage.len() {
+                                if let Some(full_text) = copy_storage.get(index) {
+                                    origin_text.borrow_mut().set_text(full_text.as_str());
+                                    if let Some(file_name) = file_name_storage.get(index) {
+                                        origin_file.borrow_mut().set_text(file_name.as_str());
+                                    }
+                                    if let Err(e) = set_clipboard(formats::Unicode, full_text.clone()) {
+                                        // 处理复制失败的情况
+                                        println!("复制失败: {}", e);
+                                    } else {
+                                        // 提示复制成功
+                                        println!("已复制完整内容");
+                                    }
+                                }
+                            } else {
+                                println!("无效的索引: {}", index);
+                            }
+                        }
+                    }
+                }
+            }
+        );
+        // 存储新的事件处理器
+        *self.event_handler.borrow_mut() = Some(new_handler);
     }
 
     // 清空展示列表
@@ -695,7 +767,7 @@ impl BasicApp {
     
     
     // 复制参数
-    fn value_copy(&self,handle: &nwg::ControlHandle) {
+    fn match_copy(&self,handle: &nwg::ControlHandle) {
         if let Some(index) = self.list_view.selected_item() {
             if let Some(item1) = self.list_view.item(index,1,100) {
                 if let Some(item2) = self.list_view.item(index,2,100) {
@@ -711,6 +783,8 @@ impl BasicApp {
         
         
     }
+
+
 
     // 复制路径
     fn path_copy(&self,handle: &nwg::ControlHandle) {
@@ -815,9 +889,22 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .parent(&data.window)
                 .build(&mut data.clear_button)?;
 
+            // 原文展示框
+            data.origin_text = Rc::new(RefCell::new(nwg::TextBox::default()));
+            nwg::TextBox::builder()
+                .parent(&data.window)
+                .text("此处展示所在行")  // 初始文本为空
+                .build(&mut data.origin_text.borrow_mut())?;
+
+            data.origin_file = Rc::new(RefCell::new(nwg::TextInput::default()));
+            nwg::TextInput::builder()
+                .parent(&data.window)
+                .text("此处展示来源名")  // 初始文本为空
+                .build(&mut data.origin_file.borrow_mut())?;
+
             nwg::ListView::builder()
                 .parent(&data.window)
-                .item_count(4)
+                .item_count(5)
                 .list_style(nwg::ListViewStyle::Detailed)  // 设置为报表样式，支持列标题
                 .build(&mut data.list_view)
                 .expect("Failed to create list view");
@@ -936,13 +1023,13 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
 
             
 
-
+            data.event_handler = RefCell::new(None);
             // Event handling
             let ui = BasicAppUi {
                 inner: Rc::new(data),
                 default_handler: Default::default(),
             };
-
+            
             // 事件绑定
             let evt_ui = Rc::downgrade(&ui.inner);
             let handle_events = move |evt, _evt_data:nwg::EventData, handle| {
@@ -960,8 +1047,8 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                             }// 处理保存按钮点击
                         },
                         E::OnWindowClose => std::process::exit(1),
-                        E::OnListViewRightClick => ui.value_copy(&handle),
-                        E::OnListViewClick => ui.path_copy(&handle),
+                        E::OnListViewRightClick => ui.match_copy(&handle),
+                        //E::OnListViewClick => ui.value_copy(&handle),
                         E::OnMenuItemSelected => {
                             if &handle == &ui.menu_about { // 关于按钮
                                 nwg::simple_message("关于&注意事项", text::ABOUT_TEXT);
@@ -1048,8 +1135,9 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 1, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 2, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 2, 1, 1))
-                //.child_item(nwg::GridLayoutItem::new(&ui.tis, col_num, row_num + 5, 2, 2))
-                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 0, 2, 17));
+                .child_item(nwg::GridLayoutItem::new(&ui.origin_text.borrow().handle, col_num + 2, 0, 2, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.origin_file.borrow().handle, col_num + 2, 1, 2, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 2, 2, 15));
 
             ui.inner.initialize_defaults();
 

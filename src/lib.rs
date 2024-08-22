@@ -4,7 +4,7 @@ use std::env;
 use pcre2::bytes::Regex;
 use encoding_rs::GBK;
 
-pub fn run(config: Config) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+pub fn run(config: Config) -> Result<Vec<(String, String, String)>, Box<dyn Error>> {
     match search(&config.query, &config.contents) {
         Ok(result) => Ok(result),
         Err(_) => {
@@ -16,7 +16,7 @@ pub fn run(config: Config) -> Result<Vec<(String, String)>, Box<dyn Error>> {
     }
 }
 
-pub fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+pub fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String, String)>, Box<dyn Error>> {
     let regex = Regex::new(query)?;
     let mut matches = vec![];
 
@@ -86,18 +86,13 @@ pub fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String)
                         continue;
                     }
                         
-                    // let sum: u32 = idcard.clone()[..17].parse().unwrap();
-                    // let weights:Vec<&u32> = [7,9,10,5,8,4,2,1,6,3,7,9,10,5,8,4,2];
-                    
-
-                    // let checksum = 
                 }
 
                 let start = m.start();
                 let end = m.end();
                 // 根据捕获的起始和结束位置获取匹配的字符串
                 let match_str = String::from_utf8_lossy(&line.as_bytes()[start..end]).to_string();
-                matches.push(((index + 1).to_string(), match_str));
+                matches.push(((index + 1).to_string(), match_str, line.clone().to_string()));
             }
         }
     }
