@@ -35,23 +35,65 @@ struct YamlConfig {
 }
 
 impl BasicApp {
+
+    fn reset_to_default_log_rules(&self) {
+        self.load_rules_from_text(text::LOG_RULES);
+    }
+
+    fn reset_to_default_package_rules(&self) {
+        self.load_rules_from_text(text::PACKAGE_RULES);
+    }
+
+    fn switch_to_log_rules_from_config(&self) -> Result<(), Box<dyn Error>> {
+        let config = self.load_config()?;
+        self.load_rules_from_config(&config, "日志规则库");
+        Ok(())
+    }
+
+    fn switch_to_package_rules_from_config(&self) -> Result<(), Box<dyn Error>> {
+        let config = self.load_config()?;
+        self.load_rules_from_config(&config, "发布包规则库");
+        Ok(())
+    }
+
+    fn load_rules_from_text(&self, rules: &[(&str, &[&str])]) {
+        for (i, &(_, patterns)) in rules.iter().enumerate() {
+            if i < self.features.len() {
+                let feature = &self.features[i];
+                feature.list_box.clear();
+                for &pattern in patterns {
+                    feature.list_box.push(pattern.to_string());
+                }
+            }
+        }
+    }
+
+    fn load_rules_from_config(&self, config: &YamlConfig, rule_set_name: &str) {
+        for rule_config in &config.rules {
+            if rule_config.name == rule_set_name {
+                for (i, feature) in self.features.iter().enumerate() {
+                    feature.list_box.clear();
+                    for pattern in &rule_config.patterns {
+                        feature.list_box.push(pattern.clone());
+                    }
+                    feature.able_checkbox.set_check_state(
+                        if rule_config.enabled {
+                            nwg::CheckBoxState::Checked
+                        } else {
+                            nwg::CheckBoxState::Unchecked
+                        }
+                    );
+                }
+            }
+        }
+    }
+
     // 获取配置文件路径
-    fn get_config_path(&self) -> PathBuf {
-        let mut config_path = home_dir().unwrap_or_else(|| PathBuf::from("."));
-        config_path.push("minigrepConfig.yaml");
-        config_path
+    fn on_generate_config_click(&self) -> Result<(), Box<dyn Error>> {
+        self.save_current_config()
     }
 
-    // 加载配置文件
-    fn load_config(&self) -> Result<YamlConfig, Box<dyn Error>> {
-        let config_content = fs::read_to_string(self.get_config_path())?;
-        let config: YamlConfig = serde_yaml::from_str(&config_content)?;
-        Ok(config)
-    }
-
-    // 函数：收集当前 list_box 中的内容并生成配置文件
     fn save_current_config(&self) -> Result<(), Box<dyn Error>> {
-        // 收集当前的配置
         let mut rules = Vec::new();
         for feature in &self.features {
             let patterns: Vec<String> = feature.list_box.collection().to_vec();
@@ -67,17 +109,21 @@ impl BasicApp {
         fs::write(self.get_config_path(), config_content)?;
         Ok(())
     }
-    
-    // 按钮点击事件：生成配置文件
-    fn on_generate_config_click(&self) -> Result<(), Box<dyn Error>> {
-        self.save_current_config()
+
+    fn load_config(&self) -> Result<YamlConfig, Box<dyn Error>> {
+        let config_content = fs::read_to_string(self.get_config_path())?;
+        let config: YamlConfig = serde_yaml::from_str(&config_content)?;
+        Ok(config)
     }
 
+    fn get_config_path(&self) -> PathBuf {
+        let mut config_path = home_dir().unwrap_or_else(|| PathBuf::from("."));
+        config_path.push("minigrepConfig.yaml");
+        config_path
+    }
 
-    // 配置文件删除确认
     fn confirm_delete_config(&self) -> bool {
-        // 弹出确认对话框
-        let params = nwg::MessageParams{
+        let params = nwg::MessageParams {
             title: "确认删除",
             content: "你确定要删除配置文件吗？",
             icons: nwg::MessageIcons::Warning,
@@ -85,8 +131,6 @@ impl BasicApp {
         };
 
         let res = nwg::modal_message(&self.window, &params);
-        
-        // 检查用户选择
         matches!(res, nwg::MessageChoice::Yes)
     }
     
@@ -118,23 +162,15 @@ impl FeatureLayout {
     pub fn initialize_defaults(&self) {
         // vec!["手机号","邮箱","身份证号","ipv4","密钥token"]
         match self.id {
-            0 => {  
-                self.list_box.push(r"(?<!\d)(1\d{10})(?!\d)".to_string());
-                self.list_box.push(r"[a-zA-Z0-9\*]+\@[a-zA-Z0-9]+\.[a-zA-Z]+".to_string());
-                self.list_box.push(r"(?<!\d)(\d{17}[Xx]|\d{18})(?!\d)".to_string());
-                self.list_box.push("((P|p)ass(P|p)ort((N|n)o(s|S)?)?(\\s)?\"?(\\s)?\\:(\\s)?(\\[)?\"?[a-zA-Z0-9]+\"?[,;]+)".to_string()); //|((P|p)ass(P|p)ort((N|n)o)?\\:(\\t)?[a-zA-Z0-9]+)
-                
+            0 => {
+                for pattern in text::LOG_RULES[0].1 {
+                    self.list_box.push(pattern.to_string());
+                }
             },
-            1 => {  
-                self.list_box.push(r"passwd|password|PASSWORD|PASSWD|PassWd|PassWD|PassWord".to_string());
-                self.list_box.push(r"Pwd|PWD|pwd".to_string());
-                self.list_box.push(r"appkey|AppKey|appKey|appKEY|AppKEY|APPKEY".to_string());
-                self.list_box.push(r"skey|SKey|SKEY|sKey|sKEY".to_string());
-                self.list_box.push(r"access_token".to_string());
-                self.list_box.push("(T|t)oken\\\"\\:\t".to_string());
-                self.list_box.push("(S|s)ecret\\\"\\:\t".to_string());
-                self.list_box.push("(C|c)ertificate".to_string());
-                self.list_box.push("(I|i)(D|d)_?(C|c)ard".to_string());
+            1 => {
+                for pattern in text::LOG_RULES[1].1 {
+                    self.list_box.push(pattern.to_string());
+                }
             },
             _ => {}  // 其他列表框可以在这里添加其他默认元素
         }
@@ -160,7 +196,11 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     menu_about: nwg::MenuItem,
     menu_generate_config: nwg::MenuItem,
     menu_delete_config_button: nwg::MenuItem,
-    menu_reset_to_default_button: nwg::MenuItem,
+    //menu_reset_to_default_button: nwg::MenuItem,
+    // menu_switch_log: nwg::MenuItem,
+    // menu_switch_package: nwg::MenuItem,
+    menu_reset_log: nwg::MenuItem,
+    menu_reset_package: nwg::MenuItem,
 
     event_handler: RefCell<Option<nwg::EventHandler>>,
     origin_text: Rc<RefCell<nwg::TextBox>>,
@@ -863,10 +903,25 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .parent(&data.window)
                 .build(&mut data.menu_delete_config_button)?;
             
-            nwg::MenuItem::builder()
-                .text("重置为默认规则")
-                .parent(&data.window)
-                .build(&mut data.menu_reset_to_default_button)?;
+                // nwg::MenuItem::builder()
+                //     .text("切换到日志配置")
+                //     .parent(&data.window)
+                //     .build(&mut data.menu_switch_log)?;
+            
+                //     nwg::MenuItem::builder()
+                //         .text("切换到发布包配置")
+                //         .parent(&data.window)
+                //         .build(&mut data.menu_switch_package)?;
+            
+                        nwg::MenuItem::builder()
+                            .text("重置为默认日志规则")
+                            .parent(&data.window)
+                            .build(&mut data.menu_reset_log)?;
+            
+                            nwg::MenuItem::builder()
+                                .text("重置为默认发布包规则")
+                                .parent(&data.window)
+                                .build(&mut data.menu_reset_package)?;
 
             // 添加输入框和按钮
             nwg::TextInput::builder()
@@ -1073,13 +1128,32 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 } else {
                                     nwg::simple_message("错误", "配置文件不存在");
                                 }
-                            } else if &handle == &ui.menu_reset_to_default_button { // 重置规则库
+                            // } else if &handle == &ui.menu_switch_log {
+                            //     if let Err(e) = ui.switch_to_log_rules_from_config() {
+                            //         nwg::simple_message("错误", &format!("切换日志配置失败: {}", e));
+                            //     }
+                            // } else if &handle == &ui.menu_switch_package {
+                            //     if let Err(e) = ui.switch_to_package_rules_from_config() {
+                            //         nwg::simple_message("错误", &format!("切换发布包配置失败: {}", e));
+                            //     }
+                            } else if &handle == &ui.menu_reset_log {
                                 for feature in &ui.features {
                                     feature.list_box.clear();
-                                    feature.initialize_defaults();
                                 }
-                                nwg::simple_message("成功", "规则已重置为默认值");
+                                ui.reset_to_default_log_rules();
+                            } else if &handle == &ui.menu_reset_package {
+                                for feature in &ui.features {
+                                    feature.list_box.clear();
+                                }
+                                ui.reset_to_default_package_rules();
                             }
+                            // else if &handle == &ui.menu_reset_to_default_button { // 重置规则库
+                            //     for feature in &ui.features {
+                            //         feature.list_box.clear();
+                            //         feature.initialize_defaults();
+                            //     }
+                            //     nwg::simple_message("成功", "规则已重置为默认值");
+                            // }
                         },
                         E::OnListBoxSelect => ui.handle_list_box_select(&handle),
                         E::OnResize => {
