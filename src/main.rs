@@ -153,7 +153,7 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     layout: nwg::GridLayout,  // 网格布局管理器
 
     features: Vec<FeatureLayout>,
-    path_input_text: nwg::TextInput,
+    path_input_text: Rc<RefCell<nwg::TextInput>>,
     filedialog: nwg::FileDialog,
     browse_button: nwg::Button,
     check_button: nwg::Button,
@@ -233,7 +233,7 @@ impl BasicApp {
             }
         };
     
-        self.path_input_text.set_text(&path_str);
+        self.path_input_text.borrow().set_text(&path_str);
     }
     
 
@@ -636,9 +636,9 @@ impl BasicApp {
     // 检测按钮点击后
     fn begin_check(&self) {
         self.list_view.clear();
-        let directory = self.path_input_text.text();
+        let directory = self.path_input_text.borrow().text();
         if directory.is_empty() {
-            self.path_input_text.set_text("请输入日志目录");
+            self.path_input_text.borrow().set_text("请输入日志目录");
             return;
         }
         self.dyn_tis.set_text("搜索中...");
@@ -701,6 +701,7 @@ impl BasicApp {
         let window_handle = &self.window.handle;
         let origin_text = Rc::clone(&self.origin_text);
         let origin_file = Rc::clone(&self.origin_file);
+        let path_input_text = Rc::clone(&self.path_input_text);
     
         let new_handler = nwg::bind_event_handler(
             list_view_handle,  // 控件句柄
@@ -708,28 +709,43 @@ impl BasicApp {
             {
                 let copy_storage = Rc::clone(&copy_storage);
                 let file_name_storage = Rc::clone(&file_name_storage);
+                let path_input_text = Rc::clone(&path_input_text);
                 move |evt, evt_data, _handle| {
-                    if let nwg::Event::OnListViewClick = evt {
-                        if let (index,_) = evt_data.on_list_view_item_index() {
-                            // 验证索引是否有效，防止崩溃
-                            if index < copy_storage.len() {
-                                if let Some(full_text) = copy_storage.get(index) {
-                                    origin_text.borrow_mut().set_text(full_text.as_str());
-                                    if let Some(file_name) = file_name_storage.get(index) {
-                                        origin_file.borrow_mut().set_text(file_name.as_str());
-                                    }
-                                    if let Err(e) = set_clipboard(formats::Unicode, full_text.clone()) {
-                                        // 处理复制失败的情况
-                                        println!("复制失败: {}", e);
-                                    } else {
-                                        // 提示复制成功
-                                        println!("已复制完整内容");
+                    match evt {
+                        nwg::Event::OnListViewClick => {
+                            if let (index,_) = evt_data.on_list_view_item_index() {
+                                // 验证索引是否有效，防止崩溃
+                                if index < copy_storage.len() {
+                                    if let Some(full_text) = copy_storage.get(index) {
+                                        origin_text.borrow_mut().set_text(full_text.as_str());
+                                        if let Some(file_name) = file_name_storage.get(index) {
+                                            origin_file.borrow_mut().set_text(file_name.as_str());
+                                        }
                                     }
                                 }
-                            } else {
-                                println!("无效的索引: {}", index);
                             }
-                        }
+                        },
+                        nwg::Event::OnFileDrop => {
+                            let paths: Vec<PathBuf> = evt_data.on_file_drop().files().into_iter().map(PathBuf::from).collect();
+                            if paths.is_empty() {
+                                return;
+                            }
+                        
+                            let path_str = if paths.len() == 1 {
+                                paths[0].to_str().unwrap_or_default().to_string()
+                            } else {
+                                // 获取所有文件的公共目录
+                                if let Some(common_dir) = paths[0].parent() {
+                                    common_dir.to_str().unwrap_or_default().to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                        
+                            path_input_text.borrow().set_text(&path_str);
+                            
+                        },
+                        _ => {}
                     }
                 }
             }
@@ -793,7 +809,7 @@ impl BasicApp {
                 _ => {}
             };
             if c.len() > 1 {
-                self.path_input_text.set_text(c.as_str());
+                self.path_input_text.borrow().set_text(c.as_str());
             }
         }
     }
@@ -898,7 +914,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             nwg::TextInput::builder()
                 .parent(&data.window)
                 .text("此处粘贴日志目录")  // 初始文本为空
-                .build(&mut data.path_input_text)?;
+                .build(&mut data.path_input_text.borrow_mut())?;
 
             nwg::Button::builder()
                 .text("选择文件/文件夹")
@@ -1174,7 +1190,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             
             }
             tmp = tmp.child_item(nwg::GridLayoutItem::new(&ui.dyn_tis, col_num, row_num-1 , 2, 2))
-                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text, col_num, row_num + 1, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text.borrow().handle, col_num, row_num + 1, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 1, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 2, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 2, 1, 1))
