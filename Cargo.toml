@@ -16,6 +16,7 @@ native-windows-gui = "1.0.0"
 yaml-rust = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+regex = "1.7"
 dirs = "4.0"
 
 # Windows子系统设置

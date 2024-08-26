@@ -8,7 +8,7 @@ extern crate native_windows_gui as nwg;  // 将 `native_windows_gui` 库引入�
 use nwg::NativeUi;
 use clipboard_win::{formats,set_clipboard};
 use std::path::Path;
-
+use regex::Regex;
 use zip::read::ZipArchive;
 use std::io::{Read, Seek,Cursor};
 use encoding_rs::GBK;
@@ -17,6 +17,7 @@ use std::str::from_utf8;
  
 use std::rc::Rc;
 use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
+use std::cell::Cell;
 
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -34,6 +35,26 @@ struct YamlConfig {
     rules: Vec<RuleConfig>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuleState {
+    Log,
+    Package,
+}
+impl Default for RuleState {
+    fn default() -> Self {
+        RuleState::Log
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineState {
+    Line3,
+    Line1,
+}
+impl Default for LineState {
+    fn default() -> Self {
+        LineState::Line3
+    }
+}
 impl BasicApp {
     // 重置为默认日志规则
     fn reset_to_default_log_rules(&self) {
@@ -168,11 +189,15 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     menu_switch_config: nwg::MenuItem,
     menu_reset_log: nwg::MenuItem,
     menu_reset_package: nwg::MenuItem,
+    menu_switch_3_line: nwg::MenuItem,
+    menu_switch_1_line: nwg::MenuItem,
 
     event_handler: RefCell<Option<nwg::EventHandler>>,
     origin_text: Rc<RefCell<nwg::TextBox>>,
     origin_file: Rc<RefCell<nwg::TextInput>>,
 
+    rule_state: Cell<RuleState>,
+    line_state: Rc<RefCell<LineState>>,
 }
 
 impl BasicApp {
@@ -199,6 +224,8 @@ impl BasicApp {
     }
 
     fn initialize_defaults(&self) {
+        self.rule_state.set(RuleState::Log);
+        *self.line_state.borrow_mut() = LineState::Line1;
         // 首先检查配置文件是否存在
         let config_path = self.get_config_path();
         if config_path.exists() {
@@ -308,13 +335,8 @@ impl BasicApp {
     fn get_file(&self, regex_list: Vec<String>, path: PathBuf, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let mut all_results: Vec<MatchResult> = Vec::new(); // 用来存储所有匹配结果
         if path.is_file() {
-            // 检查文件扩展名是否为 .class，如果是则直接跳过
-            if let Some(extension) = path.extension() {
-                if extension == "class" {
-                    return Ok(all_results); // 跳过 .class 文件
-                }
-            }
             let file_extension = path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
+            
             match file_extension {
                 "zip" => {
                     let file = fs::File::open(&path)?;
@@ -337,6 +359,13 @@ impl BasicApp {
                     all_results.extend(self.process_tar_bytes(&regex_list, file, &path, base_dir)?);
                 },
                 _ => {
+                    // 根据当前的 rule_state 进行文件后缀判断
+                    if self.rule_state.get() == RuleState::Package {
+                        match file_extension {
+                            "xml" | "properties" => { /* 继续处理 */ },
+                            _ => return Ok(all_results), // 跳过非 xml 或 properties 文件
+                        }
+                    }
                     let contents = match fs::read_to_string(&path) {
                         Ok(c) => c,
                         Err(_) => {
@@ -391,10 +420,7 @@ impl BasicApp {
                 let (decoded_name, _, _) = GBK.decode(file_name_bytes);
                 let file_name = decoded_name.to_string();
                 
-                // 跳过 .class 文件
-                if file_name.ends_with(".class") {
-                    continue;
-                }
+                
 
                 let mut relative_path = self.strip_base_dir(base_dir, zip_path);
                 relative_path = format!("{}/{}", relative_path, file_name);  // Use relative path inside zip
@@ -425,6 +451,13 @@ impl BasicApp {
                     let cursor = Cursor::new(nested_contents);
                     all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
                 } else {
+                    // 如果是发布包状态且文件不符合要求，跳过
+                    if self.rule_state.get() == RuleState::Package {
+                        if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
+                            continue;
+                        }
+                    }
+
                     let mut contents = Vec::new();
                     let contents_str = match file.read_to_end(&mut contents) {
                         Ok(_) => match String::from_utf8(contents.clone()) {
@@ -475,17 +508,19 @@ impl BasicApp {
             return self.process_zip_file(regex_list, cursor, gz_path, base_dir);
         }
 
-        // 跳过 .class 文件
-        if gz_path.extension().and_then(|ext| ext.to_str()) == Some("class") {
-            return Ok(all_results);
-        }
-
         let cursor = Cursor::new(decompressed_data.clone());
         let mut decoder = GzDecoder::new(cursor);
         let mut nested_decompressed_data = Vec::new();
         if decoder.read_to_end(&mut nested_decompressed_data).is_ok() {
             let nested_cursor = Cursor::new(nested_decompressed_data);
             return self.process_gz_file(regex_list, nested_cursor, gz_path, base_dir);
+        }
+
+        // 进一步处理解压后的文件
+        if self.rule_state.get() == RuleState::Package {
+            if !gz_path.ends_with(".xml") && !gz_path.ends_with(".properties") {
+                return Ok(all_results);
+            }
         }
     
         let contents_str = match String::from_utf8(decompressed_data.clone()) {
@@ -525,10 +560,7 @@ impl BasicApp {
                 break;
             }
 
-            // 跳过 .class 文件
-            if file_name.ends_with(".class") {
-                continue;
-            }
+            
 
             let size_str = match from_utf8(&buffer[124..136]) {
                 Ok(size) => size.trim_matches(char::from(0)),
@@ -558,6 +590,12 @@ impl BasicApp {
                 let cursor = Cursor::new(contents);
                 all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
             } else {
+                // 如果是发布包状态且文件不符合要求，跳过
+                if self.rule_state.get() == RuleState::Package {
+                    if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
+                        continue;
+                    }
+                }
                 let contents_str = match String::from_utf8(contents.clone()) {
                     Ok(c) => c,
                     Err(_) => {
@@ -604,13 +642,25 @@ impl BasicApp {
                     } else {
                         format!("{}", file_name)
                     };
-                    results.push(MatchResult {
-                        file_name: display_file_name,
-                        line_number,
-                        matched_text,
-                        origin_text
-                    });
-                }
+                    
+                    if *self.line_state.borrow() == LineState::Line3{
+                        results.push(MatchResult {
+                            file_name: display_file_name,
+                            line_number,
+                            matched_text,
+                            origin_text
+                            }   
+                        );
+                    } else {
+                        let lines: Vec<&str> = origin_text.split('\n').collect();
+                        results.push(MatchResult {
+                            file_name: display_file_name,
+                            line_number,
+                            matched_text,
+                            origin_text:lines[1].to_string(),
+                            }   
+                        );
+                    }}
             }
         }
         results
@@ -702,7 +752,7 @@ impl BasicApp {
         let origin_text = Rc::clone(&self.origin_text);
         let origin_file = Rc::clone(&self.origin_file);
         let path_input_text = Rc::clone(&self.path_input_text);
-    
+        let line_state = Rc::clone(&self.line_state);
         let new_handler = nwg::bind_event_handler(
             list_view_handle,  // 控件句柄
             window_handle,  // 父窗口句柄
@@ -710,6 +760,9 @@ impl BasicApp {
                 let copy_storage = Rc::clone(&copy_storage);
                 let file_name_storage = Rc::clone(&file_name_storage);
                 let path_input_text = Rc::clone(&path_input_text);
+                let line_state = Rc::clone(&line_state);
+                // 正则表达式用于匹配 Unicode 转义字符
+                let re = Regex::new(r"\\u([0-9a-fA-F]{4})").unwrap();
                 move |evt, evt_data, _handle| {
                     match evt {
                         nwg::Event::OnListViewClick => {
@@ -717,7 +770,12 @@ impl BasicApp {
                                 // 验证索引是否有效，防止崩溃
                                 if index < copy_storage.len() {
                                     if let Some(full_text) = copy_storage.get(index) {
-                                        origin_text.borrow_mut().set_text(full_text.as_str());
+                                        // 使用正则表达式替换 Unicode 转义字符
+                                        let unescaped_text = re.replace_all(full_text, |caps: &regex::Captures| {
+                                            let code_point = u16::from_str_radix(&caps[1], 16).unwrap();
+                                            char::from_u32(u32::from(code_point)).unwrap().to_string()
+                                        });
+                                        origin_text.borrow_mut().set_text(&unescaped_text);
                                         if let Some(file_name) = file_name_storage.get(index) {
                                             origin_file.borrow_mut().set_text(file_name.as_str());
                                         }
@@ -895,20 +953,30 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .parent(&data.window)
                 .build(&mut data.menu_delete_config_button)?;
             
-                nwg::MenuItem::builder()
-                    .text("切换到配置文件")
-                    .parent(&data.window)
-                    .build(&mut data.menu_switch_config)?;
-            
-                nwg::MenuItem::builder()
-                    .text("重置为默认日志规则")
-                    .parent(&data.window)
-                    .build(&mut data.menu_reset_log)?;
-    
-                nwg::MenuItem::builder()
-                    .text("重置为默认发布包规则")
-                    .parent(&data.window)
-                    .build(&mut data.menu_reset_package)?;
+            nwg::MenuItem::builder()
+                .text("切换到配置文件")
+                .parent(&data.window)
+                .build(&mut data.menu_switch_config)?;
+        
+            nwg::MenuItem::builder()
+                .text("重置为默认日志规则")
+                .parent(&data.window)
+                .build(&mut data.menu_reset_log)?;
+
+            nwg::MenuItem::builder()
+                .text("重置为默认发布包规则")
+                .parent(&data.window)
+                .build(&mut data.menu_reset_package)?;
+
+            nwg::MenuItem::builder()
+                .text("切换到3行展示")
+                .parent(&data.window)
+                .build(&mut data.menu_switch_3_line)?;
+
+            nwg::MenuItem::builder()
+                .text("切换到1行展示")
+                .parent(&data.window)
+                .build(&mut data.menu_switch_1_line)?;
 
             // 添加输入框和按钮
             nwg::TextInput::builder()
@@ -935,7 +1003,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             data.origin_text = Rc::new(RefCell::new(nwg::TextBox::default()));
             nwg::TextBox::builder()
                 .parent(&data.window)
-                .text("此处展示所在上下三行，所在行为中间那一行")  // 初始文本为空
+                .text("此处展示上下三行时，值所在行为中间那一行")  // 初始文本为空
                 .build(&mut data.origin_text.borrow_mut())?;
 
             data.origin_file = Rc::new(RefCell::new(nwg::TextInput::default()));
@@ -1127,17 +1195,32 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                         nwg::simple_message("错误", format!("配置文件可能不存在：{}",e).as_str());
                                     }
                                 } 
+                                ui.rule_state.set(RuleState::Log);
+                                *ui.line_state.borrow_mut() = LineState::Line1;
+                                ui.dyn_tis.set_text("切换到日志规则库，默认显示1行匹配值，下次搜索时生效")
                                 
                             } else if &handle == &ui.menu_reset_log { // 重置为默认日志规则
                                 for feature in &ui.features {
                                     feature.list_box.clear();
                                 }
                                 ui.reset_to_default_log_rules(); 
+                                ui.rule_state.set(RuleState::Log);
+                                *ui.line_state.borrow_mut() = LineState::Line1;
+                                ui.dyn_tis.set_text("切换到日志规则库，默认显示1行匹配值，下次搜索时生效")
                             } else if &handle == &ui.menu_reset_package {// 重置为默认发布包规则
                                 for feature in &ui.features {
                                     feature.list_box.clear();
                                 }
                                 ui.reset_to_default_package_rules();
+                                ui.rule_state.set(RuleState::Package);
+                                *ui.line_state.borrow_mut() = LineState::Line3;
+                                ui.dyn_tis.set_text("切换到发布包规则库，默认显示3行匹配值，下次搜索时生效")
+                            } else if &handle == &ui.menu_switch_3_line {
+                                *ui.line_state.borrow_mut() = LineState::Line3;
+                                ui.dyn_tis.set_text("切换到3行匹配值，下次搜索时生效");
+                            } else if &handle == &ui.menu_switch_1_line {
+                                *ui.line_state.borrow_mut() = LineState::Line1;
+                                ui.dyn_tis.set_text("切换到1行匹配值，下次搜索时生效");
                             }
                         },
                         E::OnListBoxSelect => ui.handle_list_box_select(&handle),
