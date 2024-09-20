@@ -6,6 +6,7 @@ mod text;
 use std::fs;
 extern crate native_windows_gui as nwg;  // 将 `native_windows_gui` 库引入并重命名为 `nwg`
 use nwg::NativeUi;
+
 use clipboard_win::{formats,set_clipboard};
 use std::path::Path;
 use regex::Regex;
@@ -193,8 +194,9 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     menu_switch_1_line: nwg::MenuItem,
 
     event_handler: RefCell<Option<nwg::EventHandler>>,
-    origin_text: Rc<RefCell<nwg::TextBox>>,
+    origin_text: Rc<RefCell<nwg::RichTextBox>>,
     origin_file: Rc<RefCell<nwg::TextInput>>,
+    rich_text_font: nwg::Font,
 
     rule_state: Cell<RuleState>,
     line_state: Rc<RefCell<LineState>>,
@@ -692,11 +694,15 @@ impl BasicApp {
             return;
         }
         self.dyn_tis.set_text("搜索中...");
+
+        
+
         let regex_list: Vec<String> = self.get_check_regex_list();
         let all_results = self.get_all_file(regex_list, directory);
         match all_results {
             Ok(all_res) => {
-                // 用于临时保存所有的完整文本
+                // 用于临时保存所有的完整文本和匹配文本
+                let mut matched_text_storage: Vec<String> = Vec::new();  // 新增
                 let mut full_text_storage: Vec<String> = Vec::new();
                 let mut file_name_storage: Vec<String> = Vec::new();
                 for result in all_res {
@@ -724,13 +730,14 @@ impl BasicApp {
                         image: None,
                     });
     
-                    // 保存完整的 `origin_text` 到临时存储中
+                    // 保存完整的 origin_text 和 matched_text 到临时存储中
                     full_text_storage.push(result.origin_text.clone());
-                    file_name_storage.push(format!("{} 第 {} 行", result.file_name, result.line_number))
+                    file_name_storage.push(format!("{} 第 {} 行", result.file_name, result.line_number));
+                    matched_text_storage.push(result.matched_text.clone());  // 新增
                     
                 }
                 // 将完整文本存储到 `ListView` 的 `userdata` 中
-                self.bind_copy_event(full_text_storage,file_name_storage);
+                self.bind_copy_event(full_text_storage,file_name_storage, matched_text_storage);
             },
             _ => { self.dyn_tis.set_text("该目录或文件中有文件内容为非文本内容，筛查失败，请检查后再试") }
         }
@@ -739,9 +746,10 @@ impl BasicApp {
         }
     }
     
-    fn bind_copy_event(&self, full_text_storage: Vec<String>,file_names: Vec<String>) {
+    fn bind_copy_event(&self, full_text_storage: Vec<String>,file_names: Vec<String>, matched_texts: Vec<String>) {
         let copy_storage = Rc::new(full_text_storage);
         let file_name_storage = Rc::new(file_names);
+        let matched_text_storage = Rc::new(matched_texts);  // 新增
         // 解除之前的事件处理器
         if let Some(handler) = self.event_handler.borrow_mut().take() {
             nwg::unbind_event_handler(&handler);
@@ -759,6 +767,7 @@ impl BasicApp {
             {
                 let copy_storage = Rc::clone(&copy_storage);
                 let file_name_storage = Rc::clone(&file_name_storage);
+                let matched_text_storage = Rc::clone(&matched_text_storage);  // 新增
                 let path_input_text = Rc::clone(&path_input_text);
                 let line_state = Rc::clone(&line_state);
                 // 正则表达式用于匹配 Unicode 转义字符
@@ -776,6 +785,33 @@ impl BasicApp {
                                             char::from_u32(u32::from(code_point)).unwrap().to_string()
                                         });
                                         origin_text.borrow_mut().set_text(&unescaped_text);
+
+                                        // 新增代码：定位并选中匹配的文本
+                                        if let Some(matched_text) = matched_text_storage.get(index) {
+                                            if let Some(pos) = unescaped_text.find(matched_text) {
+                                                let start = pos;
+                                                let end = pos + matched_text.len();
+                                                // 使用 RichTextBox 的方法设置选中范围
+                                                // 设置选中范围并更改字体颜色
+                                                origin_text.borrow_mut().set_selection((start -1) as u32 .. (end -1) as u32);
+
+                                                let c1 = nwg::CharFormat {
+                                                        text_color: Some([255, 0, 0]), // 红色字体
+                                                        effects: None,
+                                                        y_offset:  Some(22),
+                                                        height: None,
+                                                        font_face_name: None,
+                                                        underline_type: None,
+                                                    };
+
+                                                origin_text.borrow_mut().set_focus();
+                                                origin_text.borrow_mut().set_char_format(&c1);
+                                                origin_text.borrow_mut().set_background_color([155, 200, 200]);
+                                                
+
+                                            }
+                                        }
+
                                         if let Some(file_name) = file_name_storage.get(index) {
                                             origin_file.borrow_mut().set_text(file_name.as_str());
                                         }
@@ -1000,12 +1036,20 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .build(&mut data.clear_button)?;
 
             // 原文展示框
-            data.origin_text = Rc::new(RefCell::new(nwg::TextBox::default()));
-            nwg::TextBox::builder()
+            
+            nwg::Font::builder()
+                .family("黑体") // 您可以根据需要选择字体，如 "Segoe UI"、"宋体" 等
+                .size(20)          // 设置字体大小为 14，根据需要调整
+                .build(&mut data.rich_text_font)?;
+
+            data.origin_text = Rc::new(RefCell::new(nwg::RichTextBox::default()));
+            nwg::RichTextBox::builder()
                 .parent(&data.window)
                 .text("此处展示上下三行时，值所在行为中间那一行")  // 初始文本为空
+                .font(Some(&data.rich_text_font))
                 .build(&mut data.origin_text.borrow_mut())?;
-
+            data.origin_text.borrow_mut().set_background_color([155, 200, 200]);
+            
             data.origin_file = Rc::new(RefCell::new(nwg::TextInput::default()));
             nwg::TextInput::builder()
                 .parent(&data.window)
