@@ -6,7 +6,7 @@ mod text;
 use std::fs;
 extern crate native_windows_gui as nwg;  // 将 `native_windows_gui` 库引入并重命名为 `nwg`
 use nwg::NativeUi;
-
+use winapi::um::winuser::{SendMessageW, EM_SCROLLCARET, EM_LINEFROMCHAR, EM_LINESCROLL};
 use clipboard_win::{formats,set_clipboard};
 use std::path::Path;
 use regex::Regex;
@@ -788,33 +788,76 @@ impl BasicApp {
 
                                         // 新增代码：定位并选中匹配的文本
                                         if let Some(matched_text) = matched_text_storage.get(index) {
-                                            if let Some(pos) = unescaped_text.find(matched_text) {
-                                                let start = pos;
-                                                let end = pos + matched_text.len();
-                                                // 使用 RichTextBox 的方法设置选中范围
-                                                // 设置选中范围并更改字体颜色
-                                                origin_text.borrow_mut().set_selection((start -1) as u32 .. (end -1) as u32);
-
-                                                let c1 = nwg::CharFormat {
-                                                        text_color: Some([255, 0, 0]), // 红色字体
-                                                        effects: None,
-                                                        y_offset:  Some(22),
-                                                        height: None,
-                                                        font_face_name: None,
-                                                        underline_type: None,
-                                                    };
-
-                                                origin_text.borrow_mut().set_focus();
-                                                origin_text.borrow_mut().set_char_format(&c1);
-                                                origin_text.borrow_mut().set_background_color([155, 200, 200]);
-                                                
-
+                                            let mut match_positions = Vec::new(); // 存储所有匹配的字符位置
+                                        
+                                            let mut search_start = 0;
+                                            while let Some(byte_pos) = unescaped_text[search_start..].find(matched_text) {
+                                                let byte_pos = byte_pos + search_start;
+                                                // 将字节位置转换为字符索引
+                                                let start = unescaped_text[..byte_pos].chars().count();
+                                                let end = start + matched_text.chars().count();
+                                                match_positions.push((start, end));
+                                        
+                                                // 更新搜索起点，防止死循环
+                                                search_start = byte_pos + matched_text.len();
                                             }
+                                        
+                                            // 设置文本内容
+                                            origin_text.borrow_mut().set_text(&unescaped_text);
+                                        
+                                            // 遍历每个匹配值，应用高亮格式
+                                            for &(start, end) in &match_positions {
+                                                // 设置选中范围
+                                                origin_text.borrow_mut().set_selection(start as u32..end as u32);
+                                        
+                                                // 设置字符格式（高亮显示）
+                                                let c1 = nwg::CharFormat {
+                                                    text_color: Some([255, 0, 0]), // 红色字体
+                                                    effects: None,
+                                                    y_offset: None,
+                                                    height: None,
+                                                    font_face_name: None,
+                                                    underline_type: None,
+                                                };
+                                                origin_text.borrow_mut().set_char_format(&c1);
+                                            }
+                                            origin_text.borrow_mut().set_selection(0..0);
+                                            origin_text.borrow_mut().set_focus();
+                                            // 将光标移动到第一个匹配值的位置，确保可见
+                                            if let Some(&(_, first_end)) = match_positions.first() {
+                                                // 获取文本的总长度
+                                                let total_length = unescaped_text.chars().count();
+                                        
+                                                // 计算行剩余长度
+                                                let line_remaining_length = total_length - first_end;
+                                        
+                                                // 定义光标新位置
+                                                let new_caret_pos = if line_remaining_length > 20 {
+                                                    first_end + 19
+                                                    } else {
+                                                        total_length - 1
+                                                    };
+                                        
+                                                // 将选中范围设置为零长度，在新光标位置，以移动光标
+                                                origin_text.borrow_mut().set_selection(new_caret_pos as u32..new_caret_pos as u32);
+                                                origin_text.borrow_mut().set_focus();
+                                            }
+                                        
+                                            // 更新 file_name，添加匹配值数量提示
+                                            let match_count = match_positions.len();
+                                            let file_name_with_count = if match_count > 1 {
+                                                format!("({}个匹配值) | {}", match_count, file_name_storage.get(index).unwrap_or(&"".to_string()))
+                                            } else {
+                                                file_name_storage.get(index).unwrap_or(&"".to_string()).to_string()
+                                            };
+                                            // if let Some(file_name) = file_name_storage.get(index) {
+                                            //     origin_file.borrow_mut().set_text((file_name_with_count + file_name).as_str());
+                                            // }
+                                            origin_file.borrow_mut().set_text(&file_name_with_count);
                                         }
+                                        
 
-                                        if let Some(file_name) = file_name_storage.get(index) {
-                                            origin_file.borrow_mut().set_text(file_name.as_str());
-                                        }
+                                        
                                     }
                                 }
                             }
