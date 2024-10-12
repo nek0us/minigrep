@@ -1,21 +1,19 @@
 #![windows_subsystem = "windows"]
-
 use std::{error::Error, path::PathBuf, vec};
 use minigrep::Config;
 mod text;
 use std::fs;
 extern crate native_windows_gui as nwg;  // 将 `native_windows_gui` 库引入并重命名为 `nwg`
 use nwg::NativeUi;
-use winapi::um::winuser::{SendMessageW, EM_SCROLLCARET, EM_LINEFROMCHAR, EM_LINESCROLL};
 use clipboard_win::{formats,set_clipboard};
 use std::path::Path;
 use regex::Regex;
 use zip::read::ZipArchive;
-use std::io::{Read, Seek,Cursor};
+use std::io::{copy, Cursor, Read, Seek, Write};
 use encoding_rs::GBK;
 use flate2::read::GzDecoder;
 use std::str::from_utf8;
- 
+use std::process::{Stdio,Command};
 use std::rc::Rc;
 use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
 use std::cell::Cell;
@@ -23,7 +21,8 @@ use std::cell::Cell;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use dirs::home_dir;
-
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 #[derive(Serialize, Deserialize)]
 struct RuleConfig {
     name: String,
@@ -200,6 +199,8 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
 
     rule_state: Cell<RuleState>,
     line_state: Rc<RefCell<LineState>>,
+
+    ico_capoo: nwg::Icon,
 }
 
 impl BasicApp {
@@ -243,6 +244,17 @@ impl BasicApp {
 
         // 如果加载失败或文件不存在，则加载默认配置，因为后面已有实现，所以不管了
         
+
+        // 写入临时cfr文件
+
+        match fs::write("./cfr.jar", include_bytes!("cfr-0.152.jar")) {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("写入cfr临时文件失败: {}", e);
+                return;
+            }
+        }
+
     }
 
     // 处理文件拖放事件
@@ -360,14 +372,18 @@ impl BasicApp {
                     let file = fs::File::open(&path)?;
                     all_results.extend(self.process_tar_bytes(&regex_list, file, &path, base_dir)?);
                 },
+                "class" => {
+                    let file = fs::File::open(&path)?;
+                    all_results.extend(self.process_class_file(&regex_list, file, &path, base_dir)?);
+                },
                 _ => {
                     // 根据当前的 rule_state 进行文件后缀判断
-                    if self.rule_state.get() == RuleState::Package {
-                        match file_extension {
-                            "xml" | "properties" => { /* 继续处理 */ },
-                            _ => return Ok(all_results), // 跳过非 xml 或 properties 文件
-                        }
-                    }
+                    // if self.rule_state.get() == RuleState::Package {
+                    //     match file_extension {
+                    //         "xml" | "properties" => { /* 继续处理 */ },
+                    //         _ => return Ok(all_results), // 跳过非 xml 或 properties 文件
+                    //     }
+                    // }
                     let contents = match fs::read_to_string(&path) {
                         Ok(c) => c,
                         Err(_) => {
@@ -452,13 +468,18 @@ impl BasicApp {
                     file.read_to_end(&mut nested_contents)?;
                     let cursor = Cursor::new(nested_contents);
                     all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
+                } else if file_name.ends_with(".class") {
+                    let mut nested_contents = Vec::new();
+                    file.read_to_end(&mut nested_contents)?;
+                    let cursor = Cursor::new(nested_contents);
+                    all_results.extend(self.process_class_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
                 } else {
                     // 如果是发布包状态且文件不符合要求，跳过
-                    if self.rule_state.get() == RuleState::Package {
-                        if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
-                            continue;
-                        }
-                    }
+                    // if self.rule_state.get() == RuleState::Package {
+                    //     if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
+                    //         continue;
+                    //     }
+                    // }
 
                     let mut contents = Vec::new();
                     let contents_str = match file.read_to_end(&mut contents) {
@@ -519,11 +540,11 @@ impl BasicApp {
         }
 
         // 进一步处理解压后的文件
-        if self.rule_state.get() == RuleState::Package {
-            if !gz_path.ends_with(".xml") && !gz_path.ends_with(".properties") {
-                return Ok(all_results);
-            }
-        }
+        // if self.rule_state.get() == RuleState::Package {
+        //     if !gz_path.ends_with(".xml") && !gz_path.ends_with(".properties") {
+        //         return Ok(all_results);
+        //     }
+        // }
     
         let contents_str = match String::from_utf8(decompressed_data.clone()) {
             Ok(c) => c,
@@ -591,13 +612,16 @@ impl BasicApp {
             } else if file_name.ends_with(".jar") {
                 let cursor = Cursor::new(contents);
                 all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
+            } else if file_name.ends_with(".class") {
+                let cursor = Cursor::new(contents);
+                all_results.extend(self.process_class_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
             } else {
                 // 如果是发布包状态且文件不符合要求，跳过
-                if self.rule_state.get() == RuleState::Package {
-                    if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
-                        continue;
-                    }
-                }
+                // if self.rule_state.get() == RuleState::Package {
+                //     if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
+                //         continue;
+                //     }
+                // }
                 let contents_str = match String::from_utf8(contents.clone()) {
                     Ok(c) => c,
                     Err(_) => {
@@ -628,6 +652,65 @@ impl BasicApp {
         self.process_zip_file(regex_list, reader, war_path, base_dir)
     }
 
+    // 操作class文件
+    fn process_class_file<R: Read>(&self, regex_list: &[String],mut reader: R, class_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
+
+        let mut all_results: Vec<MatchResult> = Vec::new();
+        let relative_path = self.strip_base_dir(base_dir, class_path);
+
+        // 手动创建临时文件路径
+        let temp_dir = std::env::temp_dir();
+        let temp_file_path = temp_dir.join("temp_class_file.class");
+
+        // 将 class 文件数据写入临时文件
+        {
+            let mut temp_file = fs::File::create(&temp_file_path)?;
+            std::io::copy(&mut reader, &mut temp_file)?;
+        }
+
+            let mut command = Command::new("java");
+                command.arg("-jar")
+                    .arg("./cfr.jar")
+                    .arg(&temp_file_path) // 使用 "-" 表示从标准输入读取内容
+                    .stdout(Stdio::piped())  // 将标准输出重定向到管道
+                    .stderr(Stdio::piped())  // 将标准错误重定向到管道
+                    .stdin(Stdio::null());
+        
+
+        #[cfg(target_os = "windows")]
+        {
+            command.creation_flags(0x08000000); // Windows 特定：创建隐藏窗口（仅在 Windows 平台上编译时有效）
+        }
+
+        // 运行命令并获取输出
+        let output = command.spawn()
+            .and_then(|child| child.wait_with_output());
+
+        // 删除临时文件
+        std::fs::remove_file(&temp_file_path)?;
+
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    if !output.stdout.is_empty() {
+                        let result = String::from_utf8_lossy(&output.stdout);
+                        all_results.extend(self.search_in_file_contents(&regex_list, &result, class_path, &relative_path));
+                    } else {
+                        self.dyn_tis.set_text(format!("反编译失败：{} {}", class_path.to_string_lossy(), base_dir.to_string_lossy()).as_str());
+                    }
+                } else {
+                    self.dyn_tis.set_text(format!("反编译失败：{} {}", class_path.to_string_lossy(), String::from_utf8_lossy(&output.stderr)).as_str());
+                }
+            }
+            Err(e) => {
+                self.dyn_tis.set_text(format!("反编译失败：{}", e).as_str());
+            }
+        }
+
+        
+        Ok(all_results)
+    }
+
     // 搜索文件内容
     fn search_in_file_contents(&self, regex_list: &[String], contents: &str, path: &Path, file_name: &str) -> Vec<MatchResult> {
         let mut results = Vec::new();
@@ -644,7 +727,6 @@ impl BasicApp {
                     } else {
                         format!("{}", file_name)
                     };
-                    
                     if *self.line_state.borrow() == LineState::Line3{
                         results.push(MatchResult {
                             file_name: display_file_name,
@@ -760,7 +842,6 @@ impl BasicApp {
         let origin_text = Rc::clone(&self.origin_text);
         let origin_file = Rc::clone(&self.origin_file);
         let path_input_text = Rc::clone(&self.path_input_text);
-        let line_state = Rc::clone(&self.line_state);
         let new_handler = nwg::bind_event_handler(
             list_view_handle,  // 控件句柄
             window_handle,  // 父窗口句柄
@@ -769,98 +850,99 @@ impl BasicApp {
                 let file_name_storage = Rc::clone(&file_name_storage);
                 let matched_text_storage = Rc::clone(&matched_text_storage);  // 新增
                 let path_input_text = Rc::clone(&path_input_text);
-                let line_state = Rc::clone(&line_state);
                 // 正则表达式用于匹配 Unicode 转义字符
                 let re = Regex::new(r"\\u([0-9a-fA-F]{4})").unwrap();
                 move |evt, evt_data, _handle| {
                     match evt {
                         nwg::Event::OnListViewClick => {
-                            if let (index,_) = evt_data.on_list_view_item_index() {
-                                // 验证索引是否有效，防止崩溃
-                                if index < copy_storage.len() {
-                                    if let Some(full_text) = copy_storage.get(index) {
-                                        // 使用正则表达式替换 Unicode 转义字符
-                                        let unescaped_text = re.replace_all(full_text, |caps: &regex::Captures| {
-                                            let code_point = u16::from_str_radix(&caps[1], 16).unwrap();
-                                            char::from_u32(u32::from(code_point)).unwrap().to_string()
-                                        });
-                                        origin_text.borrow_mut().set_text(&unescaped_text);
+                            let (index,_) = evt_data.on_list_view_item_index();
+                            // 验证索引是否有效，防止崩溃
+                            if index < copy_storage.len() {
+                                if let Some(full_text) = copy_storage.get(index) {
+                                    // 使用正则表达式替换 Unicode 转义字符
+                                    let unescaped_text = re.replace_all(full_text, |caps: &regex::Captures| {
+                                        let code_point = u16::from_str_radix(&caps[1], 16).unwrap();
+                                        char::from_u32(u32::from(code_point)).unwrap().to_string()
+                                    });
 
-                                        // 新增代码：定位并选中匹配的文本
-                                        if let Some(matched_text) = matched_text_storage.get(index) {
-                                            let mut match_positions = Vec::new(); // 存储所有匹配的字符位置
-                                        
-                                            let mut search_start = 0;
-                                            while let Some(byte_pos) = unescaped_text[search_start..].find(matched_text) {
-                                                let byte_pos = byte_pos + search_start;
-                                                // 将字节位置转换为字符索引
-                                                let start = unescaped_text[..byte_pos].chars().count();
-                                                let end = start + matched_text.chars().count();
-                                                match_positions.push((start, end));
-                                        
-                                                // 更新搜索起点，防止死循环
-                                                search_start = byte_pos + matched_text.len();
-                                            }
-                                        
-                                            // 设置文本内容
-                                            origin_text.borrow_mut().set_text(&unescaped_text);
-                                        
-                                            // 遍历每个匹配值，应用高亮格式
-                                            for &(start, end) in &match_positions {
-                                                // 设置选中范围
-                                                origin_text.borrow_mut().set_selection(start as u32..end as u32);
-                                        
-                                                // 设置字符格式（高亮显示）
-                                                let c1 = nwg::CharFormat {
-                                                    text_color: Some([255, 0, 0]), // 红色字体
-                                                    effects: None,
-                                                    y_offset: None,
-                                                    height: None,
-                                                    font_face_name: None,
-                                                    underline_type: None,
-                                                };
-                                                origin_text.borrow_mut().set_char_format(&c1);
-                                            }
-                                            origin_text.borrow_mut().set_selection(0..0);
-                                            origin_text.borrow_mut().set_focus();
-                                            // 将光标移动到第一个匹配值的位置，确保可见
-                                            if let Some(&(_, first_end)) = match_positions.first() {
-                                                // 获取文本的总长度
-                                                let total_length = unescaped_text.chars().count();
-                                        
-                                                // 计算行剩余长度
-                                                let line_remaining_length = total_length - first_end;
-                                        
-                                                // 定义光标新位置
-                                                let new_caret_pos = if line_remaining_length > 20 {
-                                                    first_end + 19
-                                                    } else {
-                                                        total_length - 1
-                                                    };
-                                        
-                                                // 将选中范围设置为零长度，在新光标位置，以移动光标
-                                                origin_text.borrow_mut().set_selection(new_caret_pos as u32..new_caret_pos as u32);
-                                                origin_text.borrow_mut().set_focus();
-                                            }
-                                        
-                                            // 更新 file_name，添加匹配值数量提示
-                                            let match_count = match_positions.len();
-                                            let file_name_with_count = if match_count > 1 {
-                                                format!("({}个匹配值) | {}", match_count, file_name_storage.get(index).unwrap_or(&"".to_string()))
-                                            } else {
-                                                file_name_storage.get(index).unwrap_or(&"".to_string()).to_string()
-                                            };
-                                            // if let Some(file_name) = file_name_storage.get(index) {
-                                            //     origin_file.borrow_mut().set_text((file_name_with_count + file_name).as_str());
-                                            // }
-                                            origin_file.borrow_mut().set_text(&file_name_with_count);
+                                    // 将 \r\n 替换为 \n，标准化换行符，解决三行高亮异常的问题
+                                    let unescaped_text = unescaped_text.replace("\r\n", "\n");
+
+                                    origin_text.borrow_mut().set_text(&unescaped_text);
+
+                                    // 新增代码：定位并选中匹配的文本
+                                    if let Some(matched_text) = matched_text_storage.get(index) {
+                                        let mut match_positions = Vec::new(); // 存储所有匹配的字符位置
+                                    
+                                        let mut search_start = 0;
+                                        while let Some(byte_pos) = unescaped_text[search_start..].find(matched_text) {
+                                            let byte_pos = byte_pos + search_start;
+                                            // 将字节位置转换为字符索引
+                                            let start = unescaped_text[..byte_pos].chars().count();
+                                            let end = start + matched_text.chars().count();
+                                            match_positions.push((start, end));
+                                    
+                                            // 更新搜索起点，防止死循环
+                                            search_start = byte_pos + matched_text.len();
                                         }
-                                        
-
-                                        
+                                    
+                                        // 设置文本内容
+                                        origin_text.borrow_mut().set_text(&unescaped_text);
+                                    
+                                        // 遍历每个匹配值，应用高亮格式
+                                        for &(start, end) in &match_positions {
+                                            // 设置选中范围
+                                            origin_text.borrow_mut().set_selection(start as u32..end as u32);
+                                    
+                                            // 设置字符格式（高亮显示）
+                                            let c1 = nwg::CharFormat {
+                                                text_color: Some([255, 0, 0]), // 红色字体
+                                                effects: None,
+                                                y_offset: None,
+                                                height: None,
+                                                font_face_name: None,
+                                                underline_type: None,
+                                            };
+                                            origin_text.borrow_mut().set_char_format(&c1);
+                                        }
+                                        origin_text.borrow_mut().set_selection(0..0);
+                                        origin_text.borrow_mut().set_focus();
+                                        // 将光标移动到第一个匹配值的位置，确保可见
+                                        if let Some(&(_, first_end)) = match_positions.first() {
+                                            // 获取文本的总长度
+                                            let total_length = unescaped_text.chars().count();
+                                    
+                                            // 计算行剩余长度
+                                            let line_remaining_length = total_length - first_end;
+                                    
+                                            // 定义光标新位置
+                                            let new_caret_pos = if line_remaining_length > 20 {
+                                                first_end + 19
+                                                } else {
+                                                    total_length - 1
+                                                };
+                                    
+                                            // 将选中范围设置为零长度，在新光标位置，以移动光标
+                                            origin_text.borrow_mut().set_selection(new_caret_pos as u32..new_caret_pos as u32);
+                                            origin_text.borrow_mut().set_focus();
+                                        }
+                                    
+                                        // 更新 file_name，添加匹配值数量提示
+                                        let match_count = match_positions.len();
+                                        let file_name_with_count = if match_count > 1 {
+                                            format!("({}个匹配值) | {}", match_count, file_name_storage.get(index).unwrap_or(&"".to_string()))
+                                        } else {
+                                            file_name_storage.get(index).unwrap_or(&"".to_string()).to_string()
+                                        };
+                                        // if let Some(file_name) = file_name_storage.get(index) {
+                                        //     origin_file.borrow_mut().set_text((file_name_with_count + file_name).as_str());
+                                        // }
+                                        origin_file.borrow_mut().set_text(&file_name_with_count);
                                     }
+                                    
                                 }
                             }
+                            
                         },
                         nwg::Event::OnFileDrop => {
                             let paths: Vec<PathBuf> = evt_data.on_file_drop().files().into_iter().map(PathBuf::from).collect();
@@ -953,12 +1035,12 @@ impl BasicApp {
     
     
     // 复制参数
-    fn match_copy(&self,handle: &nwg::ControlHandle) {
+    fn match_copy(&self,_handle: &nwg::ControlHandle) {
         if let Some(index) = self.list_view.selected_item() {
             if let Some(item1) = self.list_view.item(index,1,100) {
-                if let Some(item2) = self.list_view.item(index,2,100) {
+                if let Some(_item2) = self.list_view.item(index,2,100) {
                     // let text = item1.text + " " + item2.text.as_str();
-                    if let Err(e) = set_clipboard(formats::Unicode, item1.text.clone()){
+                    if let Err(_e) = set_clipboard(formats::Unicode, item1.text.clone()){
 
                     } else {
                         self.dyn_tis.set_text(format!("已复制内容: {}",&item1.text.to_string()).as_str());
@@ -1000,17 +1082,26 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
         fn build_ui(mut data: BasicApp) -> Result<BasicAppUi, nwg::NwgError> {  // 构建 UI 并返回 BasicAppUi 或错误
             use nwg::Event as E;  // 引入 Event 枚举简化名称
             
+            let icon_data = include_bytes!("../capoo.ico");
+            let icon = nwg::Icon::from_bin(icon_data).expect("Failed to load icon from bytes");
             // 创建窗口
             nwg::Window::builder()
                 .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE | nwg::WindowFlags::MINIMIZE_BOX | nwg::WindowFlags::MAXIMIZE_BOX | nwg::WindowFlags::RESIZABLE)  // 窗口属性
                 .size((1100, 800))  // 窗口大小
                 .position((150, 80))  // 窗口位置
                 .accept_files(true)
-                //.center(true)
+                .icon(Some(&icon))
                 .title(text::TITLE)  // 窗口标题
                 //.maximized(true)
                 .build(&mut data.window)?;  // 构建窗口并处理错误
 
+            // 设置任务栏图标
+            let _ = nwg::Icon::builder()
+                .source_bin(Some(icon_data))
+                .strict(true)
+                .build(&mut data.ico_capoo);
+            data.window.set_icon(Some(&data.ico_capoo));
+            
             // 初始化菜单和菜单项
             nwg::MenuItem::builder()
                 .text("更新日志")
@@ -1243,7 +1334,13 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 ui.handle_button_click(&handle);
                             }// 处理保存按钮点击
                         },
-                        E::OnWindowClose => std::process::exit(1),
+                        E::OnWindowClose => {
+                            // 清理临时文件
+                            if let Err(e) = fs::remove_file("./cfr.jar") {
+                                eprintln!("未找到cfr临时文件: {}", e);
+                            }
+                            std::process::exit(1);
+                        },
                         E::OnListViewRightClick => ui.match_copy(&handle),
                         E::OnMenuItemSelected => {
                             if &handle == &ui.menu_about { // 关于按钮
@@ -1301,6 +1398,8 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 ui.reset_to_default_package_rules();
                                 ui.rule_state.set(RuleState::Package);
                                 *ui.line_state.borrow_mut() = LineState::Line3;
+                                // 因为发布版规则匹配比较完善，所以默认取消关键字匹配了
+                                ui.features[1].able_checkbox.set_check_state(nwg::CheckBoxState::Unchecked);
                                 ui.dyn_tis.set_text("切换到发布包规则库，默认显示3行匹配值，下次搜索时生效")
                             } else if &handle == &ui.menu_switch_3_line {
                                 *ui.line_state.borrow_mut() = LineState::Line3;
@@ -1398,7 +1497,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
 
 
 fn main() {
-    
+
     nwg::init().expect("Failed to init Native Windows GUI");  // 初始化 GUI 并处理错误
     nwg::Font::set_global_family("Segoe UI").expect("Failed to set default font");  // 设置默认字体
     let _ui = BasicApp::build_ui(Default::default()).expect("Failed to build UI");  // 构建 UI
