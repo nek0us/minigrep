@@ -49,7 +49,12 @@ pub const LOG_RULES: &[(&str, &[&str])] = &[
 
 pub const PACKAGE_RULES: &[(&str, &[&str])] = &[
     ("发布包规则匹配", &[
-        r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[:=\"\'\(\)\>\s\.]+[:=\"\'\(\>\s]?[a-zA-Z0-9]+[:=\"\'\(\>\s]?"#,  // 因地制宜的密钥匹配
+        r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']?[a-zA-Z0-9\@\.]+[\"\']?"#,  // 因地制宜的密钥匹配,在class中会被替换，强制搜索引号包裹的
+        r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)[\"\']?\s?value(=|:)+[\"\']?[a-zA-Z0-9\@\.]+[\"\']?"#,
+        r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)[\"\']?\>)+\s?[a-zA-Z0-9\@\.]+\<[\"\']?"#,
+        r#"(S|s)(E|e)(T|t)([a-zA-Z0-9]+)?((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\(\s?[\"\']+[a-zA-Z0-9\@\.]+[\"\']+\s?\)"#,
+        r#"[\"\']+[a-zA-Z0-9\@\.]+[\"\']+\s?\,\s?((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)+"#,
+        r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)+\s?\,\s?[\"\']+[a-zA-Z0-9\@\.]+[\"\']+"#,
     ]),
     ("发布包关键字匹配", &[
         r"(J|j)(W|w)(T|t)\\.(A|a)(L|l)(G|g)(O|o)(R|r)(I|i)(T|t)(H|h)(M|m)",  // JWT算法
