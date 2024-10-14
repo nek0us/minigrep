@@ -9,7 +9,7 @@ use clipboard_win::{formats,set_clipboard};
 use std::path::Path;
 use regex::Regex;
 use zip::read::ZipArchive;
-use std::io::{copy, Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use encoding_rs::GBK;
 use flate2::read::GzDecoder;
 use std::str::from_utf8;
@@ -247,7 +247,7 @@ impl BasicApp {
 
         // 写入临时cfr文件
 
-        match fs::write("./cfr.jar", include_bytes!("cfr-0.152.jar")) {
+        match fs::write("./cfr.jar", include_bytes!("cfr-0.153-SNAPSHOT-stdin.jar")) {
             Ok(_) => {},
             Err(e) => {
                 eprintln!("写入cfr临时文件失败: {}", e);
@@ -658,23 +658,14 @@ impl BasicApp {
         let mut all_results: Vec<MatchResult> = Vec::new();
         let relative_path = self.strip_base_dir(base_dir, class_path);
 
-        // 手动创建临时文件路径
-        let temp_dir = std::env::temp_dir();
-        let temp_file_path = temp_dir.join("temp_class_file.class");
-
-        // 将 class 文件数据写入临时文件
-        {
-            let mut temp_file = fs::File::create(&temp_file_path)?;
-            std::io::copy(&mut reader, &mut temp_file)?;
-        }
-
             let mut command = Command::new("java");
                 command.arg("-jar")
                     .arg("./cfr.jar")
-                    .arg(&temp_file_path) // 使用 "-" 表示从标准输入读取内容
+                    .arg("--stdin") 
+                    .arg("class")
                     .stdout(Stdio::piped())  // 将标准输出重定向到管道
                     .stderr(Stdio::piped())  // 将标准错误重定向到管道
-                    .stdin(Stdio::null());
+                    .stdin(Stdio::piped());
         
 
         #[cfg(target_os = "windows")]
@@ -682,29 +673,43 @@ impl BasicApp {
             command.creation_flags(0x08000000); // Windows 特定：创建隐藏窗口（仅在 Windows 平台上编译时有效）
         }
 
-        // 运行命令并获取输出
-        let output = command.spawn()
-            .and_then(|child| child.wait_with_output());
+        // 运行命令并获取子进程的句柄
+        let mut child = command.spawn()?;
 
-        // 删除临时文件
-        std::fs::remove_file(&temp_file_path)?;
+        // 获取子进程的标准输入句柄，并将 .class 文件的字节内容写入
+        if let Some(mut stdin) = child.stdin.take() {
+            let mut buffer = Vec::new();
+            reader.read_to_end(&mut buffer)?;
+            stdin.write_all(&buffer)?;
+            stdin.flush()?;
+        }
 
-        match output {
-            Ok(output) => {
-                if output.status.success() {
-                    if !output.stdout.is_empty() {
-                        let result = String::from_utf8_lossy(&output.stdout);
-                        all_results.extend(self.search_in_file_contents(&regex_list, &result, class_path, &relative_path));
-                    } else {
-                        self.dyn_tis.set_text(format!("反编译失败：{} {}", class_path.to_string_lossy(), base_dir.to_string_lossy()).as_str());
-                    }
-                } else {
-                    self.dyn_tis.set_text(format!("反编译失败：{} {}", class_path.to_string_lossy(), String::from_utf8_lossy(&output.stderr)).as_str());
-                }
+        // 读取子进程的输出
+        let output = child.wait_with_output()?;
+
+        if output.status.success() {
+            if !output.stdout.is_empty() {
+                let result = String::from_utf8_lossy(&output.stdout);
+                all_results.extend(self.search_in_file_contents(&regex_list, &result, class_path, &relative_path));
+            } else {
+                self.dyn_tis.set_text(
+                    format!(
+                        "反编译失败：{} {}",
+                        class_path.to_string_lossy(),
+                        base_dir.to_string_lossy()
+                    )
+                    .as_str(),
+                );
             }
-            Err(e) => {
-                self.dyn_tis.set_text(format!("反编译失败：{}", e).as_str());
-            }
+        } else {
+            self.dyn_tis.set_text(
+                format!(
+                    "反编译失败：{} {}",
+                    class_path.to_string_lossy(),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .as_str(),
+            );
         }
 
         
@@ -717,7 +722,7 @@ impl BasicApp {
         for query in regex_list {
             let mut query_regex = query.clone();
             // 这里替换了发布包扫描默认规则库第一条，对于class代码扫描时强制启用引号检测
-            if file_name.ends_with(".class"){
+            if file_name.ends_with(".class") | file_name.ends_with(".java"){
                 if query == r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']?[a-zA-Z0-9\@\.]+[\"\']?"# {
                     query_regex = String::from(r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']+[a-zA-Z0-9\@\.]+[\"\']+"#);
                 }
