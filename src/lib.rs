@@ -4,19 +4,118 @@ use std::env;
 use pcre2::bytes::Regex;
 use encoding_rs::GBK;
 
-pub fn run(config: Config) -> Result<Vec<(String, String, String)>, Box<dyn Error>> {
-    match search(&config.query, &config.contents) {
+use std::sync::Arc;
+use tokio::sync::{Semaphore,Mutex};
+use tokio;
+
+#[derive(Debug, Clone)]
+pub struct MatchResult {
+    pub matched_text: String,
+    pub file_name: String,
+    pub line_number: String,
+    pub origin_text: String,
+}
+
+pub async fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
+    let re_list = Arc::clone(&regex_list);
+    for query in re_list.iter() {
+        let mut query_regex = query.clone();
+        // let handle = handles.clone();
+        // 这里替换了发布包扫描默认规则库第一条，对于class代码扫描时强制启用引号检测
+        if file_name.ends_with(".class") | file_name.ends_with(".java"){
+            if query == r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']?[a-zA-Z0-9\@\.]+[\"\']?"# {
+                query_regex = String::from(r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']+[a-zA-Z0-9\@\.]+[\"\']+"#);
+            }
+            
+        }
+        let config = Config {
+            query: query_regex,
+            contents: contents.to_string(),
+            ignore_case: false,
+        };
+        let file_name_clone = String::from(file_name);
+        let res_clone = res.clone();
+        // let a: &Vec<tokio::task::JoinHandle<()>> = &*handles.borrow_mut().borrow();
+        {
+            
+            if let Ok(matches) = run(config).await {
+                for (line_number, matched_text, origin_text) in matches{
+
+                    {
+                        let mut m = res_clone.lock().await;
+                        m.push(MatchResult {
+                            file_name: file_name_clone.clone(),
+                            line_number,
+                            matched_text,
+                            origin_text
+                            }   
+                        );
+                    }
+                }
+            }
+            
+        }
+    }
+}
+
+
+pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
+
+    let re_list = Arc::clone(&regex_list);
+    for query in re_list.iter() {
+        let mut query_regex = query.clone();
+        // 这里替换了发布包扫描默认规则库第一条，对于class代码扫描时强制启用引号检测
+        if file_name.ends_with(".class") | file_name.ends_with(".java"){
+            if query == r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']?[a-zA-Z0-9\@\.]+[\"\']?"# {
+                query_regex = String::from(r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']+[a-zA-Z0-9\@\.]+[\"\']+"#);
+            }
+            
+        }
+        let config = Config {
+            query: query_regex,
+            contents: contents.to_string(),
+            ignore_case: false,
+        };
+        let file_name_clone = String::from(file_name);
+        let res_clone = res.clone();
+        {
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            //handles_ref.push(
+            tokio::spawn(async move {
+                if let Ok(matches) = run(config).await {
+                    for (line_number, matched_text, origin_text) in matches{
+
+                        {
+                            let mut m = res_clone.lock().await;
+                            m.push(MatchResult {
+                                file_name: file_name_clone.clone(),
+                                line_number,
+                                matched_text,
+                                origin_text
+                                }   
+                            );
+                        }
+                    }
+                }
+                drop(permit); // 释放许可
+            });//);
+        }
+    }
+}
+
+async fn run(config: Config) -> Result<Vec<(String, String, String)>, Box<dyn Error + Send + Sync>> {
+    match search(&config.query, &config.contents).await {
         Ok(result) => Ok(result),
         Err(_) => {
             // 尝试使用GBK编码重新匹配
             let gbk_encoded = GBK.encode(&config.contents).0;
             let gbk_contents = String::from_utf8_lossy(gbk_encoded.as_ref()).to_string();
-            search(&config.query, &gbk_contents)
+            search(&config.query, &gbk_contents).await
         }
     }
 }
 
-pub fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String, String)>, Box<dyn Error>> {
+async fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String, String)>, Box<dyn Error + Send + Sync>> {
     let regex = Regex::new(query)?;
     let mut matches = vec![];
     let lines: Vec<&str> = contents.lines().collect();

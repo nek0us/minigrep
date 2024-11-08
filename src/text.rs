@@ -1,6 +1,6 @@
 // src/text.rs
 
-pub const TITLE: &str = "minigrep by nekous v1.6";
+pub const TITLE: &str = "minigrep by nekous v1.6 release";
 pub const ABOUT_TEXT: &str = "注意:
 1. 本工具不能完全代替日志筛查,仅能用来筛查敏感信息
 2. 日志问题还包括行为记录不足,并可能存在遗漏,请手动排查
@@ -16,6 +16,7 @@ version 1.6
 1. 添加了发布包代码反编译扫描，需要java环境
 2. 添加了发布包匹配规则库，默认取消发布包关键词匹配
 3. 优化了匹配内容的高亮，快速定位，多匹配值提示
+4. 优化了匹配性能问题
 
 version 1.5
 1. 增加了发布包扫描及其规则库
@@ -36,12 +37,11 @@ pub const LOG_RULES: &[(&str, &[&str])] = &[
     ("关键字匹配", &[
         r"(P|p)(A|a)(S|s)(S|s)(W|w)((O|o)(R|r))?(D|d)",  // 更宽泛的密码匹配
         r"(A|a)(E|e)(S|s)_?(K|k)(E|e)(Y|y)",  // AES key 匹配
-        r"Pwd|PWD|pwd",
-        r"appkey|AppKey|appKey|appKEY|AppKEY|APPKEY",
-        r"skey|SKey|SKEY|sKey|sKEY",
-        r"access_token",
+        r"(A|a)(P|p)(P|p)_?(K|k)(E|e)(Y|y)",
+        r"(S|s)_?(K|k)(E|e)(Y|y)",
+        r"(A|a)ccess_?(T|t)oken",
         "(T|t)oken\\\"\\:\t",
-        "(S|s)ecret\\\"\\:\t",
+        "(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)\\\"\\:\t",
         "(C|c)ertificate",
         "(I|i)(D|d)_?(C|c)ard",
     ]),

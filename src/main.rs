@@ -1,22 +1,30 @@
 #![windows_subsystem = "windows"]
 use std::{error::Error, path::PathBuf, vec};
-use minigrep::Config;
+use minigrep::{search_in_file_contents, search_in_file_contents_sync, MatchResult};
 mod text;
 use std::fs;
-extern crate native_windows_gui as nwg;  // 将 `native_windows_gui` 库引入并重命名为 `nwg`
+extern crate native_windows_gui as nwg;  
 use nwg::NativeUi;
 use clipboard_win::{formats,set_clipboard};
 use std::path::Path;
 use regex::Regex;
 use zip::read::ZipArchive;
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Write};
 use encoding_rs::GBK;
 use flate2::read::GzDecoder;
 use std::str::from_utf8;
 use std::process::{Stdio,Command};
-use std::rc::Rc;
-use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
+// use tokio::process::Command;
+
+use std::cell::RefCell;  
 use std::cell::Cell;
+use std::time::Instant;
+
+// 多线程
+use std::sync::Arc;
+use tokio::sync::{Semaphore,Mutex};
+use tokio::io::AsyncReadExt;
+// use tokio::task;
 
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -127,13 +135,6 @@ impl BasicApp {
     
 }
 
-struct MatchResult {
-    matched_text: String,
-    file_name: String,
-    line_number: String,
-    origin_text: String,
-}
-
 
 #[derive(Default)]
 pub struct  FeatureLayout {
@@ -174,13 +175,14 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     layout: nwg::GridLayout,  // 网格布局管理器
 
     features: Vec<FeatureLayout>,
-    path_input_text: Rc<RefCell<nwg::TextInput>>,
+    path_input_text: Arc<RefCell<nwg::TextInput>>,
     filedialog: nwg::FileDialog,
     browse_button: nwg::Button,
     check_button: nwg::Button,
     clear_button: nwg::Button,
     list_view: nwg::ListView,
-    dyn_tis: nwg::Label,
+    dyn_tis: Arc<RefCell<nwg::Label>>,
+    search_tis: Arc<RefCell<nwg::Label>>,
 
     menu_update: nwg::MenuItem,
     menu_about: nwg::MenuItem,
@@ -193,12 +195,12 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     menu_switch_1_line: nwg::MenuItem,
 
     event_handler: RefCell<Option<nwg::EventHandler>>,
-    origin_text: Rc<RefCell<nwg::RichTextBox>>,
-    origin_file: Rc<RefCell<nwg::TextInput>>,
+    origin_text: Arc<RefCell<nwg::RichTextBox>>,
+    origin_file: Arc<RefCell<nwg::TextInput>>,
     rich_text_font: nwg::Font,
 
     rule_state: Cell<RuleState>,
-    line_state: Rc<RefCell<LineState>>,
+    line_state: Arc<RefCell<LineState>>,
 
     ico_capoo: nwg::Icon,
 }
@@ -346,437 +348,453 @@ impl BasicApp {
     }
 
     // 获取文件进行判断
-    fn get_file(&self, regex_list: Vec<String>, path: PathBuf, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
-        let mut all_results: Vec<MatchResult> = Vec::new(); // 用来存储所有匹配结果
-        if path.is_file() {
-            let file_extension = path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
-            
-            match file_extension {
-                "zip" => {
-                    let file = fs::File::open(&path)?;
-                    all_results.extend(self.process_zip_file(&regex_list, file, &path, base_dir)?);
-                },
-                "war" => {
-                    let file = fs::File::open(&path)?;
-                    all_results.extend(self.process_war_file(&regex_list, file, &path, base_dir)?);
-                },
-                "jar" => {
-                    let file = fs::File::open(&path)?;
-                    all_results.extend(self.process_war_file(&regex_list, file, &path, base_dir)?);
-                },
-                "gz" => {
-                    let file = fs::File::open(&path)?;
-                    all_results.extend(self.process_gz_file(&regex_list, file, &path, base_dir)?);
-                },
-                "tar" => {
-                    let file = fs::File::open(&path)?;
-                    all_results.extend(self.process_tar_bytes(&regex_list, file, &path, base_dir)?);
-                },
-                "class" => {
-                    let file = fs::File::open(&path)?;
-                    all_results.extend(self.process_class_file(&regex_list, file, &path, base_dir)?);
-                },
-                _ => {
-                    // 根据当前的 rule_state 进行文件后缀判断
-                    // if self.rule_state.get() == RuleState::Package {
-                    //     match file_extension {
-                    //         "xml" | "properties" => { /* 继续处理 */ },
-                    //         _ => return Ok(all_results), // 跳过非 xml 或 properties 文件
-                    //     }
-                    // }
-                    let contents = match fs::read_to_string(&path) {
-                        Ok(c) => c,
-                        Err(_) => {
-                            let contents_gbk = match fs::read(&path) {
-                                Ok(bytes) => {
-                                    let (cow, _, _) = GBK.decode(&bytes);
-                                    cow.into_owned()
-                                },
-                                Err(_) => {
-                                    self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", &path.to_string_lossy()).as_str());
-                                    return Ok(all_results);// 如果失败，返回错误
-                                }
-                            };
-                            contents_gbk
-                        }  
-                    };
-                    all_results.extend(self.search_in_file_contents(&regex_list, &contents, &path, &self.strip_base_dir(base_dir, &path)));
-                }
+    async fn get_file(&self,res : Arc<Mutex<Vec<MatchResult>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, path: Arc<PathBuf>, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        let file_extension = path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
+        match file_extension {
+            "zip" => {
+            let file = tokio::fs::File::open(&*path).await?;
+                self.process_zip_file(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+            },
+            "war" => {
+                let file = tokio::fs::File::open(&*path).await?;
+                self.process_war_file(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+            },
+            "jar" => {
+                let file = tokio::fs::File::open(&*path).await?;
+                self.process_war_file(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+            },
+            "gz" => {
+                let file = tokio::fs::File::open(&*path).await?;
+                self.process_gz_file(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+            },
+            "tar" => {
+                let file = tokio::fs::File::open(&*path).await?;
+                self.process_tar_bytes(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+            },
+            "class" => {
+                let file = tokio::fs::File::open(&*path).await?;
+                self.process_class_file(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+            },
+            _ => {
+                let contents = match fs::read_to_string(&*path) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let contents_gbk = match fs::read(&*path) {
+                            Ok(bytes) => {
+                                let (cow, _, _) = GBK.decode(&bytes);
+                                cow.into_owned()
+                            },
+                            Err(_) => {
+                                self.dyn_tis.borrow_mut().set_text(format!("文件 {} 不是文本文件，跳过检索", &path.to_string_lossy()).as_str());
+                                return Ok(());// 如果失败，返回错误
+                            }
+                        };
+                        contents_gbk
+                    }  
+                };
+                search_in_file_contents(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents, &self.strip_base_dir(*base_dir, &path)).await;
             }
         }
-        Ok(all_results)
+
+        Ok(())
     }
     
     // 从文件夹内获取文件
-    fn get_file_by_dir(&self, regex_list: Vec<String>, path_dir: PathBuf, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
-        let mut all_results: Vec<MatchResult> = Vec::new(); // 用来存储所有匹配结果
-    
-        for entry in fs::read_dir(path_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                // 如果是目录，则递归调用自身
-                all_results.extend(self.get_file_by_dir(regex_list.clone(), path, base_dir)?);
+    async fn get_file_by_dir(&self,res : Arc<Mutex<Vec<MatchResult>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, path_dir: PathBuf, base_dir: Arc<&Path>) {
+        let feature = Box::pin(async move {
+            if path_dir.is_file(){
+                let _ = self.get_file(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), Arc::new(path_dir), Arc::clone(&base_dir)).await; 
             } else {
-                // 如果是文件，则调用 get_file 方法处理
-                all_results.extend(self.get_file(regex_list.clone(), path, base_dir)?);
+                match fs::read_dir(path_dir) {
+                    Ok(iopen) => {
+                        for entry in iopen {
+                            match entry {
+                                Ok(en_try) => {
+                                    let path = en_try.path();
+                                    if path.is_dir() {
+                                        // 如果是目录，则递归调用自身
+                                        self.get_file_by_dir(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), path, Arc::clone(&base_dir)).await;
+                                    } else {
+                                        // 如果是文件，则调用 get_file 方法处理
+                                        let _ = self.get_file(Arc::clone(&res),  Arc::clone(&semaphore), Arc::clone(&regex_list), Arc::new(path), Arc::clone(&base_dir)).await; 
+                                    }
+                                },
+                                _ => {}
+                            }
+                            
+                        }
+                    },
+                    _ => {}
+                }
             }
-        }
-    
-        Ok(all_results)
+        });
+        feature.await
     }
     
     // 操作zip文件
-    fn process_zip_file<R: Read + Seek>(&self, regex_list: &[String], reader: R, zip_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
-        let mut all_results: Vec<MatchResult> = Vec::new();
-        let mut archive = ZipArchive::new(reader)?;
-    
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            if file.is_file() {
-                let file_name_bytes = file.name_raw();
-                let (decoded_name, _, _) = GBK.decode(file_name_bytes);
-                let file_name = decoded_name.to_string();
-                
-                
+    async fn process_zip_file<R: AsyncReadExt + Unpin >(&self, res : Arc<Mutex<Vec<MatchResult>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R, zip_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        let feature = Box::pin(async move {
+            let mut buffer = Vec::new();
+            reader.read_to_end(&mut buffer).await?;
+            let cursor = Cursor::new(buffer);
+            let mut archive = ZipArchive::new(cursor)?;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if file.is_file() {
+                    let file_name_bytes = file.name_raw();
+                    let (decoded_name, _, _) = GBK.decode(file_name_bytes);
+                    let file_name = decoded_name.to_string();
+                    
+                    let mut relative_path = self.strip_base_dir(*Arc::clone(&base_dir), zip_path);
+                    relative_path = format!("{}/{}", relative_path, file_name);  
+        
+                    if file_name.ends_with(".zip") {
+                        let mut nested_contents = Vec::new();
+                        file.read_to_end(&mut nested_contents)?;
+                        let cursor = Cursor::new(nested_contents);
+                        self.process_zip_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    } else if file_name.ends_with(".gz") {
+                        let mut nested_contents = Vec::new();
+                        file.read_to_end(&mut nested_contents)?;
+                        let cursor = Cursor::new(nested_contents);
+                        self.process_gz_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    } else if file_name.ends_with(".tar") {
+                        let mut nested_contents = Vec::new();
+                        file.read_to_end(&mut nested_contents)?;
+                        let cursor = Cursor::new(nested_contents);
+                        self.process_tar_bytes(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    } else if file_name.ends_with(".war") {
+                        let mut nested_contents = Vec::new();
+                        file.read_to_end(&mut nested_contents)?;
+                        let cursor = Cursor::new(nested_contents);
+                        self.process_war_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    } else if file_name.ends_with(".jar") {
+                        let mut nested_contents = Vec::new();
+                        file.read_to_end(&mut nested_contents)?;
+                        let cursor = Cursor::new(nested_contents);
+                        self.process_war_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    } else if file_name.ends_with(".class") {
+                        let mut nested_contents = Vec::new();
+                        file.read_to_end(&mut nested_contents)?;
+                        let cursor = Cursor::new(nested_contents);
+                        self.process_class_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    } else {
 
-                let mut relative_path = self.strip_base_dir(base_dir, zip_path);
-                relative_path = format!("{}/{}", relative_path, file_name);  // Use relative path inside zip
-    
-                if file_name.ends_with(".zip") {
-                    let mut nested_contents = Vec::new();
-                    file.read_to_end(&mut nested_contents)?;
-                    let cursor = Cursor::new(nested_contents);
-                    all_results.extend(self.process_zip_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-                } else if file_name.ends_with(".gz") {
-                    let mut nested_contents = Vec::new();
-                    file.read_to_end(&mut nested_contents)?;
-                    let cursor = Cursor::new(nested_contents);
-                    all_results.extend(self.process_gz_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-                } else if file_name.ends_with(".tar") {
-                    let mut nested_contents = Vec::new();
-                    file.read_to_end(&mut nested_contents)?;
-                    let cursor = Cursor::new(nested_contents);
-                    all_results.extend(self.process_tar_bytes(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-                } else if file_name.ends_with(".war") {
-                    let mut nested_contents = Vec::new();
-                    file.read_to_end(&mut nested_contents)?;
-                    let cursor = Cursor::new(nested_contents);
-                    all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-                } else if file_name.ends_with(".jar") {
-                    let mut nested_contents = Vec::new();
-                    file.read_to_end(&mut nested_contents)?;
-                    let cursor = Cursor::new(nested_contents);
-                    all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-                } else if file_name.ends_with(".class") {
-                    let mut nested_contents = Vec::new();
-                    file.read_to_end(&mut nested_contents)?;
-                    let cursor = Cursor::new(nested_contents);
-                    all_results.extend(self.process_class_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-                } else {
-                    // 如果是发布包状态且文件不符合要求，跳过
-                    // if self.rule_state.get() == RuleState::Package {
-                    //     if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
-                    //         continue;
-                    //     }
-                    // }
-
-                    let mut contents = Vec::new();
-                    let contents_str = match file.read_to_end(&mut contents) {
-                        Ok(_) => match String::from_utf8(contents.clone()) {
-                            Ok(c) => c,
-                            Err(_) => {
-                                let (cow, _, had_errors) = GBK.decode(&contents);
-                                if had_errors {
-                                    self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", &relative_path).as_str());
-                                    continue; // 跳过此文件
+                        let mut contents = Vec::new();
+                        let contents_str = match file.read_to_end(&mut contents) {
+                            Ok(_) => match String::from_utf8(contents.clone()) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    let (cow, _, had_errors) = GBK.decode(&contents);
+                                    if had_errors {
+                                        self.dyn_tis.borrow_mut().set_text(format!("文件 {} 不是文本文件，跳过检索", &relative_path).as_str());
+                                        continue; // 跳过此文件
+                                    }
+                                    cow.into_owned()
                                 }
-                                cow.into_owned()
+                            },
+                            Err(_) => {
+                                self.dyn_tis.borrow_mut().set_text(format!("文件 {} 不是文本文件，跳过检索", &relative_path).as_str());
+                                continue; // 跳过此文件
                             }
-                        },
-                        Err(_) => {
-                            self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", &relative_path).as_str());
-                            continue; // 跳过此文件
-                        }
-                    };
-                    all_results.extend(self.search_in_file_contents(&regex_list, &contents_str, Path::new(&relative_path), &relative_path));
+                        };
+                        search_in_file_contents(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str, &relative_path).await;
+                    }
                 }
             }
-        }
-    
-        Ok(all_results)
+        
+            Ok(())
+        });
+        feature.await
     }
     
     // 操作gz文件
-    fn process_gz_file<R: Read>(&self, regex_list: &[String], reader: R, gz_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
-        let mut all_results: Vec<MatchResult> = Vec::new();
-        let mut decoder = GzDecoder::new(reader);
-        let mut decompressed_data = Vec::new();
-        match decoder.read_to_end(&mut decompressed_data) {
-            Ok(_) => (),
-            Err(e) => {
-                self.dyn_tis.set_text(format!("解压文件 {} 失败: {}", gz_path.to_string_lossy(), e).as_str());
-                return Ok(all_results);
-            }
-        }
-        // 假设.gz文件可能是.tar.gz
-        if gz_path.file_name().and_then(|name| name.to_str()).map_or(false, |name| name.ends_with(".tar.gz")) {
-            let cursor = Cursor::new(&decompressed_data);
-            return self.process_tar_bytes(regex_list, cursor, gz_path, base_dir);
-        }
-        let cursor = Cursor::new(&decompressed_data);
-        // 进一步检查解压后的文件类型
-        let archive = ZipArchive::new(cursor.clone());
-        if archive.is_ok() {
-            return self.process_zip_file(regex_list, cursor, gz_path, base_dir);
-        }
-
-        let cursor = Cursor::new(decompressed_data.clone());
-        let mut decoder = GzDecoder::new(cursor);
-        let mut nested_decompressed_data = Vec::new();
-        if decoder.read_to_end(&mut nested_decompressed_data).is_ok() {
-            let nested_cursor = Cursor::new(nested_decompressed_data);
-            return self.process_gz_file(regex_list, nested_cursor, gz_path, base_dir);
-        }
-
-        // 进一步处理解压后的文件
-        // if self.rule_state.get() == RuleState::Package {
-        //     if !gz_path.ends_with(".xml") && !gz_path.ends_with(".properties") {
-        //         return Ok(all_results);
-        //     }
-        // }
-    
-        let contents_str = match String::from_utf8(decompressed_data.clone()) {
-            Ok(c) => c,
-            Err(_) => {
-                let (cow, _, had_errors) = GBK.decode(&decompressed_data);
-                if had_errors {
-                    self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", gz_path.to_string_lossy()).as_str());
-                    return Ok(all_results);
+    async fn process_gz_file<R: AsyncReadExt + Unpin>(&self,  res : Arc<Mutex<Vec<MatchResult>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R,  gz_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        let feature = Box::pin(async move {
+            
+            let mut buffer = Vec::new();
+            reader.read_to_end(&mut buffer).await?;
+            let cursor = Cursor::new(buffer);
+            let mut decoder = GzDecoder::new(cursor);
+            let mut decompressed_data = Vec::new();
+            match decoder.read_to_end(&mut decompressed_data) {
+                Ok(_) => (),
+                Err(e) => {
+                    self.dyn_tis.borrow_mut().set_text(format!("解压文件 {} 失败: {}", gz_path.to_string_lossy(), e).as_str());
+                    return Ok(());
                 }
-                cow.into_owned()
             }
-        };
-    
-        let relative_path = self.strip_base_dir(base_dir, gz_path);
-        all_results.extend(self.search_in_file_contents(&regex_list, &contents_str, gz_path, &relative_path));
-    
-        Ok(all_results)
+            // 假设.gz文件可能是.tar.gz
+            if gz_path.file_name().and_then(|name| name.to_str()).map_or(false, |name| name.ends_with(".tar.gz")) {
+                let cursor = Cursor::new(&decompressed_data);
+                return self.process_tar_bytes(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, gz_path, Arc::clone(&base_dir)).await;
+            }
+            let cursor = Cursor::new(&decompressed_data);
+            // 进一步检查解压后的文件类型
+            let archive = ZipArchive::new(cursor.clone());
+            if archive.is_ok() {
+                return self.process_zip_file(Arc::clone(&res), Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, gz_path, Arc::clone(&base_dir)).await;
+            }
+
+            let cursor = Cursor::new(decompressed_data.clone());
+            let mut decoder = GzDecoder::new(cursor);
+            let mut nested_decompressed_data = Vec::new();
+            if decoder.read_to_end(&mut nested_decompressed_data).is_ok() {
+                let nested_cursor = Cursor::new(nested_decompressed_data);
+                return self.process_gz_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), nested_cursor, gz_path, Arc::clone(&base_dir)).await;
+            }
+
+            let contents_str = match String::from_utf8(decompressed_data.clone()) {
+                Ok(c) => c,
+                Err(_) => {
+                    let (cow, _, had_errors) = GBK.decode(&decompressed_data);
+                    if had_errors {
+                        self.dyn_tis.borrow_mut().set_text(format!("文件 {} 不是文本文件，跳过检索", gz_path.to_string_lossy()).as_str());
+                        return Ok(());
+                    }
+                    cow.into_owned()
+                }
+            };
+        
+            let relative_path = self.strip_base_dir(*base_dir, gz_path);
+            search_in_file_contents(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str, &relative_path).await;
+        
+            Ok(())
+        });
+        feature.await
     }
     
     // 操作tar文件
-    fn process_tar_bytes<R: Read>(&self, regex_list: &[String], mut reader: R, tar_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
-        let mut all_results: Vec<MatchResult> = Vec::new();
-        let mut buffer = [0; 512];
-    
-        loop {
-            if reader.read_exact(&mut buffer).is_err() {
-                break;
-            }
-    
-            let file_name = match from_utf8(&buffer[0..100]) {
-                Ok(name) => name.trim_matches(char::from(0)).to_string(),
-                Err(_) => break,
-            };
-    
-            if file_name.is_empty() {
-                break;
-            }
-
-            
-
-            let size_str = match from_utf8(&buffer[124..136]) {
-                Ok(size) => size.trim_matches(char::from(0)),
-                Err(_) => break,
-            };
-    
-            let size = usize::from_str_radix(size_str, 8).unwrap_or(0);
-    
-            let mut contents = vec![0; size];
-            reader.read_exact(&mut contents)?;
-    
-            let relative_path = format!("{}/{}", self.strip_base_dir(base_dir, tar_path), file_name);
-    
-            if file_name.ends_with(".tar") {
-                let cursor = Cursor::new(contents);
-                all_results.extend(self.process_tar_bytes(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-            } else if file_name.ends_with(".gz") {
-                let cursor = Cursor::new(contents);
-                all_results.extend(self.process_gz_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-            } else if file_name.ends_with(".zip") {
-                let cursor = Cursor::new(contents);
-                all_results.extend(self.process_zip_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-            } else if file_name.ends_with(".war") {
-                let cursor = Cursor::new(contents);
-                all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-            } else if file_name.ends_with(".jar") {
-                let cursor = Cursor::new(contents);
-                all_results.extend(self.process_war_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-            } else if file_name.ends_with(".class") {
-                let cursor = Cursor::new(contents);
-                all_results.extend(self.process_class_file(&regex_list, cursor, Path::new(&relative_path), base_dir)?);
-            } else {
-                // 如果是发布包状态且文件不符合要求，跳过
-                // if self.rule_state.get() == RuleState::Package {
-                //     if !file_name.ends_with(".xml") && !file_name.ends_with(".properties") {
-                //         continue;
-                //     }
-                // }
-                let contents_str = match String::from_utf8(contents.clone()) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        let (cow, _, had_errors) = GBK.decode(&contents);
-                        if had_errors {
-                            self.dyn_tis.set_text(format!("文件 {} 不是文本文件，跳过检索", tar_path.to_string_lossy()).as_str());
-                            continue;
-                        }
-                        cow.into_owned()
-                    }
+    async fn process_tar_bytes<R: AsyncReadExt + Unpin>(&self, res : Arc<Mutex<Vec<MatchResult>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R,  tar_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        let feature = Box::pin(async move {
+            let mut buffer = [0; 512];
+        
+            loop {
+                if reader.read_exact(&mut buffer).await.is_err() {
+                    break;
+                }
+        
+                let file_name = match from_utf8(&buffer[0..100]) {
+                    Ok(name) => name.trim_matches(char::from(0)).to_string(),
+                    Err(_) => break,
                 };
-                all_results.extend(self.search_in_file_contents(&regex_list, &contents_str, Path::new(&relative_path), &relative_path));
+        
+                if file_name.is_empty() {
+                    break;
+                }
+
+                let size_str = match from_utf8(&buffer[124..136]) {
+                    Ok(size) => size.trim_matches(char::from(0)),
+                    Err(_) => break,
+                };
+        
+                let size = usize::from_str_radix(size_str, 8).unwrap_or(0);
+        
+                let mut contents = vec![0; size];
+                reader.read_exact(&mut contents).await?;
+        
+                let relative_path = format!("{}/{}", self.strip_base_dir(*base_dir, tar_path), file_name);
+        
+                if file_name.ends_with(".tar") {
+                    let cursor = Cursor::new(contents);
+                    self.process_tar_bytes(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                } else if file_name.ends_with(".gz") {
+                    let cursor = Cursor::new(contents);
+                    self.process_gz_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                } else if file_name.ends_with(".zip") {
+                    let cursor = Cursor::new(contents);
+                    self.process_zip_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                } else if file_name.ends_with(".war") {
+                    let cursor = Cursor::new(contents);
+                    self.process_war_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                } else if file_name.ends_with(".jar") {
+                    let cursor = Cursor::new(contents);
+                    self.process_war_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                } else if file_name.ends_with(".class") {
+                    let cursor = Cursor::new(contents);
+                    self.process_class_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                } else {
+                    let contents_str = match String::from_utf8(contents.clone()) {
+                        Ok(c) => c,
+                        Err(_) => {
+                            let (cow, _, had_errors) = GBK.decode(&contents);
+                            if had_errors {
+                                self.dyn_tis.borrow_mut().set_text(format!("文件 {} 不是文本文件，跳过检索", tar_path.to_string_lossy()).as_str());
+                                continue;
+                            }
+                            cow.into_owned()
+                        }
+                    };
+                    search_in_file_contents(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str,  &relative_path).await;
+                }
+        
+                let remainder = 512 - (size % 512);
+                if remainder < 512 {
+                    let mut skip = vec![0; remainder];
+                    reader.read_exact(&mut skip).await?;
+                }
             }
-    
-            let remainder = 512 - (size % 512);
-            if remainder < 512 {
-                let mut skip = vec![0; remainder];
-                reader.read_exact(&mut skip)?;
-            }
-        }
-    
-        Ok(all_results)
+        
+            Ok(())
+        });
+        feature.await
     }
     
     // 操作war文件 jar也是
-    fn process_war_file<R: Read + Seek>(&self, regex_list: &[String], reader: R, war_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
+    async fn process_war_file<R: AsyncReadExt + Unpin >(&self, res : Arc<Mutex<Vec<MatchResult>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, reader: R,  war_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
         // WAR 文件本质上是 ZIP 文件，所以我们可以调用 process_zip_file
-        self.process_zip_file(regex_list, reader, war_path, base_dir)
+        self.process_zip_file(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), reader, war_path, Arc::clone(&base_dir)).await
     }
 
     // 操作class文件
-    fn process_class_file<R: Read>(&self, regex_list: &[String],mut reader: R, class_path: &Path, base_dir: &Path) -> Result<Vec<MatchResult>, Box<dyn Error>> {
-
-        let mut all_results: Vec<MatchResult> = Vec::new();
-        let relative_path = self.strip_base_dir(base_dir, class_path);
-
-            let mut command = Command::new("java");
-                command.arg("-jar")
-                    .arg("./cfr.jar")
-                    .arg("--stdin") 
-                    .arg("class")
-                    .stdout(Stdio::piped())  // 将标准输出重定向到管道
-                    .stderr(Stdio::piped())  // 将标准错误重定向到管道
-                    .stdin(Stdio::piped());
-        
-
-        #[cfg(target_os = "windows")]
-        {
-            command.creation_flags(0x08000000); // Windows 特定：创建隐藏窗口（仅在 Windows 平台上编译时有效）
-        }
-
-        // 运行命令并获取子进程的句柄
-        let mut child = command.spawn()?;
-
-        // 获取子进程的标准输入句柄，并将 .class 文件的字节内容写入
-        if let Some(mut stdin) = child.stdin.take() {
-            let mut buffer = Vec::new();
-            reader.read_to_end(&mut buffer)?;
-            stdin.write_all(&buffer)?;
-            stdin.flush()?;
-        }
-
-        // 读取子进程的输出
-        let output = child.wait_with_output()?;
-
-        if output.status.success() {
-            if !output.stdout.is_empty() {
-                let result = String::from_utf8_lossy(&output.stdout);
-                all_results.extend(self.search_in_file_contents(&regex_list, &result, class_path, &relative_path));
-            } else {
-                self.dyn_tis.set_text(
-                    format!(
-                        "反编译失败：{} {}",
-                        class_path.to_string_lossy(),
-                        base_dir.to_string_lossy()
-                    )
-                    .as_str(),
-                );
-            }
-        } else {
-            self.dyn_tis.set_text(
-                format!(
-                    "反编译失败：{} {}",
-                    class_path.to_string_lossy(),
-                    String::from_utf8_lossy(&output.stderr)
-                )
-                .as_str(),
-            );
-        }
-
-        
-        Ok(all_results)
-    }
-
-    // 搜索文件内容
-    fn search_in_file_contents(&self, regex_list: &[String], contents: &str, path: &Path, file_name: &str) -> Vec<MatchResult> {
-        let mut results = Vec::new();
-        for query in regex_list {
-            let mut query_regex = query.clone();
-            // 这里替换了发布包扫描默认规则库第一条，对于class代码扫描时强制启用引号检测
-            if file_name.ends_with(".class") | file_name.ends_with(".java"){
-                if query == r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']?[a-zA-Z0-9\@\.]+[\"\']?"# {
-                    query_regex = String::from(r#"((P|p)((A|a)(S|s)(S|s))?(W|w)((O|o)(R|r))?(D|d)|(K|k)(E|e)(Y|y)|(E|e)(N|n)(C|c)(R|r)(Y|y)(P|p)(T|t)|(S|s)(E|e)(C|c)(R|r)(E|e)(T|t)|(A|a)(U|u)(T|t)(H|h)((O|o)(R|r)(I|i)(Z|z)(A|a)(T|t)(I|i)(O|o)(N|n))?)\s?[\"\']?(=|:)+\s?[\"\']+[a-zA-Z0-9\@\.]+[\"\']+"#);
+    async fn process_class_file<R: AsyncReadExt + Unpin>(&self, res : Arc<Mutex<Vec<MatchResult>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader_origin: R,  class_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        let relative_path = self.strip_base_dir(*base_dir, class_path);
+        let mut buffer = Vec::new();
+        if let Ok(_) = reader_origin.read_to_end(&mut buffer).await {
+            {
+                let mut command = Command::new("java");
+                    command.arg("-jar")
+                        .arg("./cfr.jar")
+                        .arg("--stdin") 
+                        .arg("class")
+                        .stdout(Stdio::piped())  // 将标准输出重定向到管道
+                        .stderr(Stdio::piped())  // 将标准错误重定向到管道
+                        .stdin(Stdio::piped());
+    
+                #[cfg(target_os = "windows")]
+                {
+                    command.creation_flags(0x08000000); // Windows 特定：创建隐藏窗口（仅在 Windows 平台上编译时有效）
                 }
+
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                //handle.push(
+                    tokio::spawn(async move {
+                    // 运行命令并获取子进程的句柄
+                    match command.spawn() {
+                        Ok(mut c) => {
+                        // 获取子进程的标准输入句柄，并将 .class 文件的字节内容写入
+                        if let Some(mut stdin) = c.stdin.take() {
+                            // let mut buffer = Vec::new();
+                            // match reader.read_to_end(&mut buffer) {
+                            //     Ok(_) => {
+                                    match stdin.write_all(&buffer) {
+                                        Ok(_) => {
+                                            match stdin.flush() {
+                                                Ok(_) => {
+                                            
+                                                },
+                                                _ => {}
+                                            }
+                                        },
+                                        _ => {}
+                                    }
+                                    
+                                // },
+                                // _ => {}
+                            // }
+                            
+                        }
                 
-            }
-            let config = Config {
-                query: query_regex,
-                contents: contents.to_string(),
-                ignore_case: false,
-            };
-            if let Ok(matches) = minigrep::run(config) {
-                for (line_number, matched_text, origin_text) in matches {
-                    let display_file_name = if path.is_file() {
-                        file_name.to_string()  // 直接使用文件名，不需要额外的路径信息
-                    } else {
-                        format!("{}", file_name)
-                    };
-                    if *self.line_state.borrow() == LineState::Line3{
-                        results.push(MatchResult {
-                            file_name: display_file_name,
-                            line_number,
-                            matched_text,
-                            origin_text
-                            }   
-                        );
-                    } else {
-                        let lines: Vec<&str> = origin_text.split('\n').collect();
-                        results.push(MatchResult {
-                            file_name: display_file_name,
-                            line_number,
-                            matched_text,
-                            origin_text:lines[1].to_string(),
-                            }   
-                        );
-                    }}
+                        // 读取子进程的输出
+                        let mut output = Vec::new();
+
+                        if let Some(mut stdout) = c.stdout.take() {
+                            if let Err(e) = stdout.read_to_end(&mut output) {
+                                eprintln!("Error reading stdout: {}", e);
+                            }
+                        }
+    
+                        // 处理输出
+                        if let Ok(output_status) = c.wait() {
+                            if output_status.success() {
+                                if !output.is_empty() {
+                                    let result = String::from_utf8_lossy(&output);
+                                    search_in_file_contents_sync(Arc::clone(&res), Arc::clone(&semaphore), Arc::clone(&regex_list), &result, &relative_path).await;
+                                }
+                            } else {
+                                // 处理错误情况
+                                eprintln!("Command failed with status: {:?}", output_status);
+                            }
+                        }
+    
+                        drop(permit); // 释放信号量
+
+                        // if let Ok(output) = c.wait_with_output() {
+                        //     if output.status.success() {
+                        //         if !output.stdout.is_empty() {
+                        //             let result = String::from_utf8_lossy(&output.stdout);
+                        //             search_in_file_contents_sync(Arc::clone(&res),  Arc::clone(&semaphore),Arc::clone(&regex_list), &result,  &relative_path).await;
+                        //         } else {
+                        //             // self.dyn_tis.set_text(
+                        //             //     format!(
+                        //             //         "反编译失败：{} {}",
+                        //             //         class_path.to_string_lossy(),
+                        //             //         base_dir.to_string_lossy()
+                        //             //     )
+                        //             //     .as_str(),
+                        //             // );
+                        //         }
+                        //     } else {
+                        //         // self.dyn_tis.set_text(
+                        //         //     format!(
+                        //         //         "反编译失败：{} {}",
+                        //         //         class_path.to_string_lossy(),
+                        //         //         String::from_utf8_lossy(&output.stderr)
+                        //         //     )
+                        //         //     .as_str(),
+                        //         // );
+                        //     }
+                        //     drop(permit); // 释放许可
+                        // }            
+                        
+                        },
+                        _ => {}
+                    }
+            
+    
+                });//);
             }
         }
-        results
+
+        
+        
+        
+
+        
+        Ok(())
     }
     
     // 获取目录下所有文件
-    fn get_all_file(&self, regex_list: Vec<String>, path_dir: String) -> Result<Vec<MatchResult>, Box<dyn Error>> {
-            // let res = self.is_dir_or_file(regex_list, path_dir);
-            let path = PathBuf::from(path_dir);
-            let all_results: Result<Vec<MatchResult>, Box<dyn Error>>;
-            let base_dir = path.clone();
-            if path.is_dir() {
-                // 如果是目录，则递归处理目录中的所有文件
-                all_results = self.get_file_by_dir(regex_list, path, &base_dir)
-            } else {
-                // 如果是文件，直接处理该文件
-                all_results = self.get_file(regex_list, path, &base_dir)
+    async fn get_all_file(&self, regex_list: Arc<Vec<String>>, path_dir: String) -> Result<Vec<MatchResult>, Box<dyn Error>> {
+            let res : Arc<Mutex<Vec<MatchResult>>> = Arc::new(Mutex::new(Vec::new()));
+            let semaphore : Arc<Semaphore> = Arc::new(Semaphore::new(8));
+
+            let path = PathBuf::from(path_dir.clone());
+            let base_dir = Arc::new(path.as_path());
+
+            self.get_file_by_dir(Arc::clone(&res), Arc::clone(&semaphore),Arc::clone(&regex_list), PathBuf::from(path_dir.clone()), Arc::clone(&base_dir)).await;
+
+            let mut results = Vec::new();
+            {
+                let m = res.lock().await;
+
+                for x in m.iter() {
+                    if *self.line_state.borrow_mut() == LineState::Line3 {
+                        results.push(x.clone());
+                    } else {
+                        let lines: Vec<&str> = x.origin_text.split('\n').collect();
+                        results.push( MatchResult {
+                            file_name: x.file_name.clone(),
+                            line_number: x.line_number.clone(),
+                            matched_text: x.matched_text.clone(),
+                            origin_text: lines[1].to_string(),
+                        });
+                    }
+                }
             }
-            all_results
+
+
+            Ok(results)
     }
 
     
@@ -788,63 +806,68 @@ impl BasicApp {
             self.path_input_text.borrow().set_text("请输入日志目录");
             return;
         }
-        self.dyn_tis.set_text("搜索中...");
-
+        self.search_tis.borrow_mut().set_text("搜索中...");
+        let start = Instant::now();
         
 
-        let regex_list: Vec<String> = self.get_check_regex_list();
-        let all_results = self.get_all_file(regex_list, directory);
-        match all_results {
-            Ok(all_res) => {
-                // 用于临时保存所有的完整文本和匹配文本
-                let mut matched_text_storage: Vec<String> = Vec::new();  // 新增
-                let mut full_text_storage: Vec<String> = Vec::new();
-                let mut file_name_storage: Vec<String> = Vec::new();
-                for result in all_res {
-                    let list_view_num = self.list_view.len();
-                    
-                    self.list_view.insert_item(nwg::InsertListViewItem {
-                        column_index: 0,
-                        text: Some(list_view_num.to_string()),
-                        index: Some(list_view_num as i32),
-                        image: None,
-                    });
-    
-                    self.list_view.insert_item(nwg::InsertListViewItem {
-                        column_index: 1,
-                        text: Some(result.matched_text.clone()),
-                        index: Some(list_view_num as i32),
-                        image: None,
-                    });
+        let regex_list: Arc<Vec<String>> = Arc::new(self.get_check_regex_list());
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let all_results = self.get_all_file(regex_list, directory).await;
+        
+            match all_results {
+                Ok(all_res) => {
+                    // 用于临时保存所有的完整文本和匹配文本
+                    let mut matched_text_storage: Vec<String> = Vec::new();  // 新增
+                    let mut full_text_storage: Vec<String> = Vec::new();
+                    let mut file_name_storage: Vec<String> = Vec::new();
+                    for result in all_res {
+                        let list_view_num = self.list_view.len();
+                        
+                        self.list_view.insert_item(nwg::InsertListViewItem {
+                            column_index: 0,
+                            text: Some(list_view_num.to_string()),
+                            index: Some(list_view_num as i32),
+                            image: None,
+                        });
+        
+                        self.list_view.insert_item(nwg::InsertListViewItem {
+                            column_index: 1,
+                            text: Some(result.matched_text.clone()),
+                            index: Some(list_view_num as i32),
+                            image: None,
+                        });
 
 
-                    self.list_view.insert_item(nwg::InsertListViewItem {
-                        column_index: 2,
-                        text: Some(format!("{} 第 {} 行", result.file_name, result.line_number)),
-                        index: Some(list_view_num as i32),
-                        image: None,
-                    });
-    
-                    // 保存完整的 origin_text 和 matched_text 到临时存储中
-                    full_text_storage.push(result.origin_text.clone());
-                    file_name_storage.push(format!("{} 第 {} 行", result.file_name, result.line_number));
-                    matched_text_storage.push(result.matched_text.clone());  // 新增
-                    
-                }
-                // 将完整文本存储到 `ListView` 的 `userdata` 中
-                self.bind_copy_event(full_text_storage,file_name_storage, matched_text_storage);
-            },
-            _ => { self.dyn_tis.set_text("该目录或文件中有文件内容为非文本内容，筛查失败，请检查后再试") }
-        }
-        if self.dyn_tis.text() == "搜索中..." {
-            self.dyn_tis.set_text("搜索完成");
-        }
+                        self.list_view.insert_item(nwg::InsertListViewItem {
+                            column_index: 2,
+                            text: Some(format!("{} 第 {} 行", result.file_name, result.line_number)),
+                            index: Some(list_view_num as i32),
+                            image: None,
+                        });
+        
+                        // 保存完整的 origin_text 和 matched_text 到临时存储中
+                        full_text_storage.push(result.origin_text.clone());
+                        file_name_storage.push(format!("{} 第 {} 行", result.file_name, result.line_number));
+                        matched_text_storage.push(result.matched_text.clone());  // 新增
+                        
+                    }
+                    // 将完整文本存储到 `ListView` 的 `userdata` 中
+                    self.bind_copy_event(full_text_storage,file_name_storage, matched_text_storage);
+                },
+                _ => { self.dyn_tis.borrow_mut().set_text("该目录或文件中有文件内容为非文本内容，筛查失败，请检查后再试") }
+            }
+            
+            let duration = start.elapsed();
+            self.search_tis.borrow_mut().set_text(format!("搜索完成,耗时：{:?}",duration).as_str());
+        });
     }
     
     fn bind_copy_event(&self, full_text_storage: Vec<String>,file_names: Vec<String>, matched_texts: Vec<String>) {
-        let copy_storage = Rc::new(full_text_storage);
-        let file_name_storage = Rc::new(file_names);
-        let matched_text_storage = Rc::new(matched_texts);  // 新增
+        let copy_storage = Arc::new(full_text_storage);
+        let file_name_storage = Arc::new(file_names);
+        let matched_text_storage = Arc::new(matched_texts);  // 新增
         // 解除之前的事件处理器
         if let Some(handler) = self.event_handler.borrow_mut().take() {
             nwg::unbind_event_handler(&handler);
@@ -852,17 +875,17 @@ impl BasicApp {
         // 绑定 `ListView` 的激活事件来处理复制逻辑
         let list_view_handle = &self.list_view.handle;
         let window_handle = &self.window.handle;
-        let origin_text = Rc::clone(&self.origin_text);
-        let origin_file = Rc::clone(&self.origin_file);
-        let path_input_text = Rc::clone(&self.path_input_text);
+        let origin_text = Arc::clone(&self.origin_text);
+        let origin_file = Arc::clone(&self.origin_file);
+        let path_input_text = Arc::clone(&self.path_input_text);
         let new_handler = nwg::bind_event_handler(
             list_view_handle,  // 控件句柄
             window_handle,  // 父窗口句柄
             {
-                let copy_storage = Rc::clone(&copy_storage);
-                let file_name_storage = Rc::clone(&file_name_storage);
-                let matched_text_storage = Rc::clone(&matched_text_storage);  // 新增
-                let path_input_text = Rc::clone(&path_input_text);
+                let copy_storage = Arc::clone(&copy_storage);
+                let file_name_storage = Arc::clone(&file_name_storage);
+                let matched_text_storage = Arc::clone(&matched_text_storage);  // 新增
+                let path_input_text = Arc::clone(&path_input_text);
                 // 正则表达式用于匹配 Unicode 转义字符
                 let re = Regex::new(r"\\u([0-9a-fA-F]{4})").unwrap();
                 move |evt, evt_data, _handle| {
@@ -1056,7 +1079,7 @@ impl BasicApp {
                     if let Err(_e) = set_clipboard(formats::Unicode, item1.text.clone()){
 
                     } else {
-                        self.dyn_tis.set_text(format!("已复制内容: {}",&item1.text.to_string()).as_str());
+                        self.dyn_tis.borrow_mut().set_text(format!("已复制内容: {}",&item1.text.to_string()).as_str());
                     };
                 }
             }
@@ -1080,14 +1103,13 @@ impl BasicApp {
 mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
     use super::*; 
     // 引入上级作用域中的所有项
-    use std::rc::Rc;  // 使用 Rc 用于引用计数的智能指针
     use std::cell::RefCell;  // 使用 RefCell 提供内部可变性
     use std::ops::Deref;  
     // 引入 Deref trait 用于自定义解引用行为
     use nwg::CheckBoxState;
 
     pub struct BasicAppUi {  // 定义 UI 管理结构体
-        inner: Rc<BasicApp>,  // 使用 Rc 封装 BasicApp，允许多处共享所有权
+        inner: Arc<BasicApp>,  // 使用 Rc 封装 BasicApp，允许多处共享所有权
         default_handler: RefCell<Option<nwg::EventHandler>>  // 事件处理器，用 RefCell 提供内部可变性
     }
 
@@ -1189,7 +1211,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .size(20)          // 设置字体大小为 14，根据需要调整
                 .build(&mut data.rich_text_font)?;
 
-            data.origin_text = Rc::new(RefCell::new(nwg::RichTextBox::default()));
+            data.origin_text = Arc::new(RefCell::new(nwg::RichTextBox::default()));
             nwg::RichTextBox::builder()
                 .parent(&data.window)
                 .text("此处展示上下三行时，值所在行为中间那一行")  // 初始文本为空
@@ -1197,7 +1219,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .build(&mut data.origin_text.borrow_mut())?;
             data.origin_text.borrow_mut().set_background_color([155, 200, 200]);
             
-            data.origin_file = Rc::new(RefCell::new(nwg::TextInput::default()));
+            data.origin_file = Arc::new(RefCell::new(nwg::TextInput::default()));
             nwg::TextInput::builder()
                 .parent(&data.window)
                 .text("此处展示来源名")  // 初始文本为空
@@ -1213,7 +1235,14 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             nwg::Label::builder()
                 .parent(&data.window)
                 .text("这里是提示框")
-                .build(&mut data.dyn_tis)
+                .build(&mut data.dyn_tis.borrow_mut())
+                .expect("动态文字展示出错");
+
+
+            nwg::Label::builder()
+                .parent(&data.window)
+                .text("尚未搜索")
+                .build(&mut data.search_tis.borrow_mut())
                 .expect("动态文字展示出错");
 
             let _ = nwg::FileDialog::builder()
@@ -1327,12 +1356,12 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
             data.event_handler = RefCell::new(None);
             // Event handling
             let ui = BasicAppUi {
-                inner: Rc::new(data),
+                inner: Arc::new(data),
                 default_handler: Default::default(),
             };
             
             // 事件绑定
-            let evt_ui = Rc::downgrade(&ui.inner);
+            let evt_ui = Arc::downgrade(&ui.inner);
             let handle_events = move |evt, _evt_data:nwg::EventData, handle| {
                 if let Some(ui) = evt_ui.upgrade() {
                     match evt {
@@ -1394,7 +1423,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 } 
                                 ui.rule_state.set(RuleState::Log);
                                 *ui.line_state.borrow_mut() = LineState::Line1;
-                                ui.dyn_tis.set_text("切换到日志规则库，默认显示1行匹配值，下次搜索时生效")
+                                ui.dyn_tis.borrow_mut().set_text("切换到日志规则库，默认显示1行匹配值，下次搜索时生效")
                                 
                             } else if &handle == &ui.menu_reset_log { // 重置为默认日志规则
                                 for feature in &ui.features {
@@ -1403,7 +1432,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 ui.reset_to_default_log_rules(); 
                                 ui.rule_state.set(RuleState::Log);
                                 *ui.line_state.borrow_mut() = LineState::Line1;
-                                ui.dyn_tis.set_text("切换到日志规则库，默认显示1行匹配值，下次搜索时生效")
+                                ui.dyn_tis.borrow_mut().set_text("切换到日志规则库，默认显示1行匹配值，下次搜索时生效")
                             } else if &handle == &ui.menu_reset_package {// 重置为默认发布包规则
                                 for feature in &ui.features {
                                     feature.list_box.clear();
@@ -1413,13 +1442,13 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 *ui.line_state.borrow_mut() = LineState::Line3;
                                 // 因为发布版规则匹配比较完善，所以默认取消关键字匹配了
                                 ui.features[1].able_checkbox.set_check_state(nwg::CheckBoxState::Unchecked);
-                                ui.dyn_tis.set_text("切换到发布包规则库，默认显示3行匹配值，下次搜索时生效")
+                                ui.dyn_tis.borrow_mut().set_text("切换到发布包规则库，默认显示3行匹配值，下次搜索时生效")
                             } else if &handle == &ui.menu_switch_3_line {
                                 *ui.line_state.borrow_mut() = LineState::Line3;
-                                ui.dyn_tis.set_text("切换到3行匹配值，下次搜索时生效");
+                                ui.dyn_tis.borrow_mut().set_text("切换到3行匹配值，下次搜索时生效");
                             } else if &handle == &ui.menu_switch_1_line {
                                 *ui.line_state.borrow_mut() = LineState::Line1;
-                                ui.dyn_tis.set_text("切换到1行匹配值，下次搜索时生效");
+                                ui.dyn_tis.borrow_mut().set_text("切换到1行匹配值，下次搜索时生效");
                             }
                         },
                         E::OnListBoxSelect => ui.handle_list_box_select(&handle),
@@ -1471,14 +1500,15 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 x.initialize_defaults();
             
             }
-            tmp = tmp.child_item(nwg::GridLayoutItem::new(&ui.dyn_tis, col_num, row_num-1 , 2, 2))
-                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text.borrow().handle, col_num, row_num + 1, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 1, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 2, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 2, 1, 1))
+            tmp = tmp.child_item(nwg::GridLayoutItem::new(&ui.search_tis.borrow().handle, col_num, row_num-1 , 2, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.dyn_tis.borrow().handle, col_num, row_num , 2, 2))
+                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text.borrow().handle, col_num, row_num + 2, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 2, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 3, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 3, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.origin_text.borrow().handle, col_num + 2, 0, 2, 3))
                 .child_item(nwg::GridLayoutItem::new(&ui.origin_file.borrow().handle, col_num + 2, 3, 2, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 4, 2, 13));
+                .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 4, 2, 14));
 
             ui.inner.initialize_defaults();
 
