@@ -16,7 +16,7 @@ pub struct MatchResult {
     pub origin_text: String,
 }
 
-pub async fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
+pub async fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
     let re_list = Arc::clone(&regex_list);
     for query in re_list.iter() {
         let mut query_regex = query.clone();
@@ -59,9 +59,10 @@ pub async fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, se
 }
 
 
-pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
+pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
 
     let re_list = Arc::clone(&regex_list);
+    
     for query in re_list.iter() {
         let mut query_regex = query.clone();
         // 这里替换了发布包扫描默认规则库第一条，对于class代码扫描时强制启用引号检测
@@ -81,26 +82,31 @@ pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,  semaph
         {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             //handles_ref.push(
-            tokio::spawn(async move {
-                if let Ok(matches) = run(config).await {
-                    for (line_number, matched_text, origin_text) in matches{
+            let handle = tokio::spawn(async move {
+            if let Ok(matches) = run(config).await {
+                for (line_number, matched_text, origin_text) in matches{
 
-                        {
-                            let mut m = res_clone.lock().await;
-                            m.push(MatchResult {
-                                file_name: file_name_clone.clone(),
-                                line_number,
-                                matched_text,
-                                origin_text
-                                }   
-                            );
-                        }
+                    {
+                        let mut m = res_clone.lock().await;
+                        m.push(MatchResult {
+                            file_name: file_name_clone.clone(),
+                            line_number,
+                            matched_text,
+                            origin_text
+                            }   
+                        );
                     }
                 }
-                drop(permit); // 释放许可
+            }
+            drop(permit); // 释放许可
             });//);
+            {
+                let mut hs = handles.lock().await;
+                hs.push(handle);
+            }
         }
     }
+
 }
 
 async fn run(config: Config) -> Result<Vec<(String, String, String)>, Box<dyn Error + Send + Sync>> {
