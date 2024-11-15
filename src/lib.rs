@@ -4,8 +4,8 @@ use std::env;
 use pcre2::bytes::Regex;
 use encoding_rs::GBK;
 
-use std::sync::Arc;
-use tokio::sync::{Semaphore,Mutex};
+use std::sync::{Arc,Mutex};
+use tokio::sync::{Semaphore};
 use tokio;
 
 #[derive(Debug, Clone)]
@@ -16,7 +16,7 @@ pub struct MatchResult {
     pub origin_text: String,
 }
 
-pub async fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
+pub fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
     let re_list = Arc::clone(&regex_list);
     for query in re_list.iter() {
         let mut query_regex = query.clone();
@@ -38,11 +38,11 @@ pub async fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, re
         // let a: &Vec<tokio::task::JoinHandle<()>> = &*handles.borrow_mut().borrow();
         {
             
-            if let Ok(matches) = run(config).await {
+            if let Ok(matches) = run(config) {
                 for (line_number, matched_text, origin_text) in matches{
 
                     {
-                        let mut m = res_clone.lock().await;
+                        let mut m = res_clone.lock().unwrap();
                         m.push(MatchResult {
                             file_name: file_name_clone.clone(),
                             line_number,
@@ -59,7 +59,7 @@ pub async fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, re
 }
 
 
-pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
+pub fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
 
     let re_list = Arc::clone(&regex_list);
     
@@ -80,14 +80,14 @@ pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,handles:
         let file_name_clone = String::from(file_name);
         let res_clone = res.clone();
         {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = Arc::clone(&semaphore);
             //handles_ref.push(
             let handle = tokio::spawn(async move {
-            if let Ok(matches) = run(config).await {
+            if let Ok(matches) = run(config) {
                 for (line_number, matched_text, origin_text) in matches{
 
                     {
-                        let mut m = res_clone.lock().await;
+                        let mut m = res_clone.lock().unwrap();
                         m.push(MatchResult {
                             file_name: file_name_clone.clone(),
                             line_number,
@@ -101,7 +101,7 @@ pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,handles:
             drop(permit); // 释放许可
             });//);
             {
-                let mut hs = handles.lock().await;
+                let mut hs = handles.lock().unwrap();
                 hs.push(handle);
             }
         }
@@ -109,19 +109,19 @@ pub async fn search_in_file_contents(res : Arc<Mutex<Vec<MatchResult>>>,handles:
 
 }
 
-async fn run(config: Config) -> Result<Vec<(String, String, String)>, Box<dyn Error + Send + Sync>> {
-    match search(&config.query, &config.contents).await {
+fn run(config: Config) -> Result<Vec<(String, String, String)>, Box<dyn Error>> {
+    match search(&config.query, &config.contents) {
         Ok(result) => Ok(result),
         Err(_) => {
             // 尝试使用GBK编码重新匹配
             let gbk_encoded = GBK.encode(&config.contents).0;
             let gbk_contents = String::from_utf8_lossy(gbk_encoded.as_ref()).to_string();
-            search(&config.query, &gbk_contents).await
+            search(&config.query, &gbk_contents)
         }
     }
 }
 
-async fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String, String)>, Box<dyn Error + Send + Sync>> {
+fn search<'a>(query: &str, contents: &'a str) -> Result<Vec<(String, String, String)>, Box<dyn Error>> {
     let regex = Regex::new(query)?;
     let mut matches = vec![];
     let lines: Vec<&str> = contents.lines().collect();

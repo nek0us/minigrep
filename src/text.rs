@@ -1,6 +1,7 @@
 // src/text.rs
+pub const TITLE: &'static str =
+    include_str!(concat!(env!("OUT_DIR"), "/VERSION"));
 
-pub const TITLE: &str = "minigrep by nekous v1.61 release";
 pub const ABOUT_TEXT: &str = "注意:
 1. 本工具不能完全代替日志筛查,仅能用来筛查敏感信息
 2. 日志问题还包括行为记录不足,并可能存在遗漏,请手动排查

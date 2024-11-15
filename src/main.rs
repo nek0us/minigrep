@@ -14,7 +14,6 @@ use encoding_rs::GBK;
 use flate2::read::GzDecoder;
 use std::str::from_utf8;
 use std::process::{Stdio,Command};
-// use tokio::process::Command;
 
 use std::cell::RefCell;  
 use std::cell::Cell;
@@ -22,9 +21,8 @@ use std::time::Instant;
 
 // 多线程
 use std::sync::Arc;
-use tokio::sync::{Semaphore,Mutex};
-use tokio::io::AsyncReadExt;
-// use tokio::task;
+use std::sync::Mutex;
+use tokio::sync::Semaphore;
 
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -348,38 +346,38 @@ impl BasicApp {
     }
 
     // 获取文件进行判断
-    async fn get_file(&self,res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, path: Arc<PathBuf>, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+    fn get_file(&self,res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, path: Arc<PathBuf>, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
         let file_extension = path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
         match file_extension {
             "zip" => {
-            let file = tokio::fs::File::open(&*path).await?;
-                self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+            let file = fs::File::open(&*path)?;
+                self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir))?;
             },
             "war" => {
-                let file = tokio::fs::File::open(&*path).await?;
-                self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+                let file = fs::File::open(&*path)?;
+                self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir))?;
             },
             "jar" => {
-                let file = tokio::fs::File::open(&*path).await?;
-                self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+                let file = fs::File::open(&*path)?;
+                self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir))?;
             },
             "gz" => {
-                let file = tokio::fs::File::open(&*path).await?;
-                self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+                let file = fs::File::open(&*path)?;
+                self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir))?;
             },
             "tar" => {
-                let file = tokio::fs::File::open(&*path).await?;
-                self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+                let file = fs::File::open(&*path)?;
+                self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir))?;
             },
             "class" => {
-                let file = tokio::fs::File::open(&*path).await?;
-                self.process_class_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir)).await?;
+                let file = fs::File::open(&*path)?;
+                self.process_class_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), file, &path, Arc::clone(&base_dir))?;
             },
             _ => {
-                let contents = match tokio::fs::read_to_string(&*path).await {
+                let contents = match fs::read_to_string(&*path) {
                     Ok(c) => c,
                     Err(_) => {
-                        let contents_gbk = match tokio::fs::read(&*path).await {
+                        let contents_gbk = match fs::read(&*path) {
                             Ok(bytes) => {
                                 let (cow, _, _) = GBK.decode(&bytes);
                                 cow.into_owned()
@@ -392,7 +390,7 @@ impl BasicApp {
                         contents_gbk
                     }  
                 };
-                search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents, &self.strip_base_dir(*base_dir, &path)).await;
+                search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents, &self.strip_base_dir(*base_dir, &path));
             }
         }
 
@@ -400,10 +398,10 @@ impl BasicApp {
     }
     
     // 从文件夹内获取文件
-    async fn get_file_by_dir(&self,res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, path_dir: PathBuf, base_dir: Arc<&Path>) {
-        let feature = Box::pin(async move {
+    fn get_file_by_dir(&self,res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, path_dir: PathBuf, base_dir: Arc<&Path>) {
+        
             if path_dir.is_file(){
-                let _ = self.get_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), Arc::new(path_dir), Arc::clone(&base_dir)).await; 
+                let _ = self.get_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), Arc::new(path_dir), Arc::clone(&base_dir)); 
             } else {
                 match fs::read_dir(path_dir) {
                     Ok(iopen) => {
@@ -413,10 +411,10 @@ impl BasicApp {
                                     let path = en_try.path();
                                     if path.is_dir() {
                                         // 如果是目录，则递归调用自身
-                                        self.get_file_by_dir(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), path, Arc::clone(&base_dir)).await;
+                                        self.get_file_by_dir(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), path, Arc::clone(&base_dir));
                                     } else {
                                         // 如果是文件，则调用 get_file 方法处理
-                                        let _ = self.get_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), Arc::new(path), Arc::clone(&base_dir)).await; 
+                                        let _ = self.get_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore), Arc::clone(&regex_list), Arc::new(path), Arc::clone(&base_dir)); 
                                     }
                                 },
                                 _ => {}
@@ -427,15 +425,13 @@ impl BasicApp {
                     _ => {}
                 }
             }
-        });
-        feature.await
     }
     
     // 操作zip文件
-    async fn process_zip_file<R: AsyncReadExt + Unpin >(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R, zip_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
-        let feature = Box::pin(async move {
+    fn process_zip_file<R: Read >(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R, zip_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        
             let mut buffer = Vec::new();
-            reader.read_to_end(&mut buffer).await?;
+            reader.read_to_end(&mut buffer)?;
             let cursor = Cursor::new(buffer);
             let mut archive = ZipArchive::new(cursor)?;
             for i in 0..archive.len() {
@@ -452,32 +448,32 @@ impl BasicApp {
                         let mut nested_contents = Vec::new();
                         file.read_to_end(&mut nested_contents)?;
                         let cursor = Cursor::new(nested_contents);
-                        self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                        self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                     } else if file_name.ends_with(".gz") {
                         let mut nested_contents = Vec::new();
                         file.read_to_end(&mut nested_contents)?;
                         let cursor = Cursor::new(nested_contents);
-                        self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                        self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                     } else if file_name.ends_with(".tar") {
                         let mut nested_contents = Vec::new();
                         file.read_to_end(&mut nested_contents)?;
                         let cursor = Cursor::new(nested_contents);
-                        self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                        self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                     } else if file_name.ends_with(".war") {
                         let mut nested_contents = Vec::new();
                         file.read_to_end(&mut nested_contents)?;
                         let cursor = Cursor::new(nested_contents);
-                        self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                        self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                     } else if file_name.ends_with(".jar") {
                         let mut nested_contents = Vec::new();
                         file.read_to_end(&mut nested_contents)?;
                         let cursor = Cursor::new(nested_contents);
-                        self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                        self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                     } else if file_name.ends_with(".class") {
                         let mut nested_contents = Vec::new();
                         file.read_to_end(&mut nested_contents)?;
                         let cursor = Cursor::new(nested_contents);
-                        self.process_class_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                        self.process_class_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                     } else {
 
                         let mut contents = Vec::new();
@@ -498,22 +494,20 @@ impl BasicApp {
                                 continue; // 跳过此文件
                             }
                         };
-                        search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str, &relative_path).await;
+                        search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str, &relative_path);
                     }
                 }
             }
         
             Ok(())
-        });
-        feature.await
     }
     
     // 操作gz文件
-    async fn process_gz_file<R: AsyncReadExt + Unpin>(&self,  res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R,  gz_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
-        let feature = Box::pin(async move {
+    fn process_gz_file<R: Read>(&self,  res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R,  gz_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        
             
             let mut buffer = Vec::new();
-            reader.read_to_end(&mut buffer).await?;
+            reader.read_to_end(&mut buffer)?;
             let cursor = Cursor::new(buffer);
             let mut decoder = GzDecoder::new(cursor);
             let mut decompressed_data = Vec::new();
@@ -527,13 +521,13 @@ impl BasicApp {
             // 假设.gz文件可能是.tar.gz
             if gz_path.file_name().and_then(|name| name.to_str()).map_or(false, |name| name.ends_with(".tar.gz")) {
                 let cursor = Cursor::new(&decompressed_data);
-                return self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, gz_path, Arc::clone(&base_dir)).await;
+                return self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, gz_path, Arc::clone(&base_dir));
             }
             let cursor = Cursor::new(&decompressed_data);
             // 进一步检查解压后的文件类型
             let archive = ZipArchive::new(cursor.clone());
             if archive.is_ok() {
-                return self.process_zip_file(Arc::clone(&res), Arc::clone(&handles), Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, gz_path, Arc::clone(&base_dir)).await;
+                return self.process_zip_file(Arc::clone(&res), Arc::clone(&handles), Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, gz_path, Arc::clone(&base_dir));
             }
 
             let cursor = Cursor::new(decompressed_data.clone());
@@ -541,7 +535,7 @@ impl BasicApp {
             let mut nested_decompressed_data = Vec::new();
             if decoder.read_to_end(&mut nested_decompressed_data).is_ok() {
                 let nested_cursor = Cursor::new(nested_decompressed_data);
-                return self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), nested_cursor, gz_path, Arc::clone(&base_dir)).await;
+                return self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), nested_cursor, gz_path, Arc::clone(&base_dir));
             }
 
             let contents_str = match String::from_utf8(decompressed_data.clone()) {
@@ -557,20 +551,18 @@ impl BasicApp {
             };
         
             let relative_path = self.strip_base_dir(*base_dir, gz_path);
-            search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str, &relative_path).await;
+            search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str, &relative_path);
         
             Ok(())
-        });
-        feature.await
     }
     
     // 操作tar文件
-    async fn process_tar_bytes<R: AsyncReadExt + Unpin>(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R,  tar_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
-        let feature = Box::pin(async move {
+    fn process_tar_bytes<R: Read>(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader: R,  tar_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+        
             let mut buffer = [0; 512];
         
             loop {
-                if reader.read_exact(&mut buffer).await.is_err() {
+                if reader.read_exact(&mut buffer).is_err() {
                     break;
                 }
         
@@ -591,28 +583,28 @@ impl BasicApp {
                 let size = usize::from_str_radix(size_str, 8).unwrap_or(0);
         
                 let mut contents = vec![0; size];
-                reader.read_exact(&mut contents).await?;
+                reader.read_exact(&mut contents)?;
         
                 let relative_path = format!("{}/{}", self.strip_base_dir(*base_dir, tar_path), file_name);
         
                 if file_name.ends_with(".tar") {
                     let cursor = Cursor::new(contents);
-                    self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    self.process_tar_bytes(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                 } else if file_name.ends_with(".gz") {
                     let cursor = Cursor::new(contents);
-                    self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    self.process_gz_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                 } else if file_name.ends_with(".zip") {
                     let cursor = Cursor::new(contents);
-                    self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                 } else if file_name.ends_with(".war") {
                     let cursor = Cursor::new(contents);
-                    self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                 } else if file_name.ends_with(".jar") {
                     let cursor = Cursor::new(contents);
-                    self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    self.process_war_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                 } else if file_name.ends_with(".class") {
                     let cursor = Cursor::new(contents);
-                    self.process_class_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir)).await?;
+                    self.process_class_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), cursor, Path::new(&relative_path), Arc::clone(&base_dir))?;
                 } else {
                     let contents_str = match String::from_utf8(contents.clone()) {
                         Ok(c) => c,
@@ -625,32 +617,30 @@ impl BasicApp {
                             cow.into_owned()
                         }
                     };
-                    search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str,  &relative_path).await;
+                    search_in_file_contents(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &contents_str,  &relative_path);
                 }
         
                 let remainder = 512 - (size % 512);
                 if remainder < 512 {
                     let mut skip = vec![0; remainder];
-                    reader.read_exact(&mut skip).await?;
+                    reader.read_exact(&mut skip)?;
                 }
             }
         
             Ok(())
-        });
-        feature.await
     }
     
     // 操作war文件 jar也是
-    async fn process_war_file<R: AsyncReadExt + Unpin >(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, reader: R,  war_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+    fn process_war_file<R: Read >(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, reader: R,  war_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
         // WAR 文件本质上是 ZIP 文件，所以我们可以调用 process_zip_file
-        self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), reader, war_path, Arc::clone(&base_dir)).await
+        self.process_zip_file(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), reader, war_path, Arc::clone(&base_dir))
     }
 
     // 操作class文件
-    async fn process_class_file<R: AsyncReadExt + Unpin>(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader_origin: R,  class_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
+    fn process_class_file<R: Read>(&self, res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,  semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, mut reader_origin: R,  class_path: &Path, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
         let relative_path = self.strip_base_dir(*base_dir, class_path);
         let mut buffer = Vec::new();
-        if let Ok(_) = reader_origin.read_to_end(&mut buffer).await {
+        if let Ok(_) = reader_origin.read_to_end(&mut buffer) {
             {
                 let mut command = Command::new("java");
                     command.arg("-jar")
@@ -666,8 +656,9 @@ impl BasicApp {
                     command.creation_flags(0x08000000); // Windows 特定：创建隐藏窗口（仅在 Windows 平台上编译时有效）
                 }
 
-                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                let semaphore_clone = Arc::clone(&semaphore);
                 let handle = tokio::spawn(async move {
+                    let permit = semaphore_clone.acquire().await;
                     // 运行命令并获取子进程的句柄
                     match command.spawn() {
                         Ok(mut c) => {
@@ -708,7 +699,7 @@ impl BasicApp {
                             if output_status.success() {
                                 if !output.is_empty() {
                                     let result = String::from_utf8_lossy(&output);
-                                    search_in_file_contents_sync(Arc::clone(&res), Arc::clone(&regex_list), &result, &relative_path).await;
+                                    search_in_file_contents_sync(Arc::clone(&res), Arc::clone(&regex_list), &result, &relative_path);
                                 }
                             } else {
                                 // 处理错误情况
@@ -722,7 +713,7 @@ impl BasicApp {
                         //     if output.status.success() {
                         //         if !output.stdout.is_empty() {
                         //             let result = String::from_utf8_lossy(&output.stdout);
-                        //             search_in_file_contents_sync(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &result,  &relative_path).await;
+                        //             search_in_file_contents_sync(Arc::clone(&res), Arc::clone(&handles),  Arc::clone(&semaphore),Arc::clone(&regex_list), &result,  &relative_path);
                         //         } else {
                         //             // self.dyn_tis.set_text(
                         //             //     format!(
@@ -753,7 +744,7 @@ impl BasicApp {
     
                 });//);
                 {
-                    let mut hs = handles.lock().await;
+                    let mut hs = handles.lock().unwrap();
                     hs.push(handle);
                 }
             }
@@ -768,6 +759,7 @@ impl BasicApp {
     }
     
     // 获取目录下所有文件
+    // #[tokio::main]
     async fn get_all_file(&self, regex_list: Arc<Vec<String>>, path_dir: String) -> Result<Vec<MatchResult>, Box<dyn Error>> {
         let res : Arc<Mutex<Vec<MatchResult>>> = Arc::new(Mutex::new(Vec::new()));
         let semaphore : Arc<Semaphore> = Arc::new(Semaphore::new(8));
@@ -775,22 +767,22 @@ impl BasicApp {
         let path = PathBuf::from(path_dir.clone());
         let base_dir = Arc::new(path.as_path());
 
-        self.get_file_by_dir(Arc::clone(&res), Arc::clone(&handles), Arc::clone(&semaphore),Arc::clone(&regex_list), PathBuf::from(path_dir.clone()), Arc::clone(&base_dir)).await;
+        self.get_file_by_dir(Arc::clone(&res), Arc::clone(&handles), Arc::clone(&semaphore),Arc::clone(&regex_list), PathBuf::from(path_dir.clone()), Arc::clone(&base_dir));
 
         {
-            let mut hs = handles.lock().await;
+            let mut hs = handles.lock().unwrap();
             let handles_vrc = hs.drain(..).collect::<Vec<_>>();
             drop(hs);
 
             for handle in handles_vrc {
-                handle.await.unwrap();
+                let _ = handle.await;
             }
         }
        
 
         let mut results = Vec::new();
         {
-            let m = res.lock().await;
+            let m = res.lock().unwrap();
 
             for x in m.iter() {
                 if *self.line_state.borrow_mut() == LineState::Line3 {
