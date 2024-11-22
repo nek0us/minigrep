@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
+use std::borrow::Borrow;
 use std::{error::Error, path::PathBuf, vec};
-use minigrep::{search_in_file_contents, search_in_file_contents_sync, MatchResult};
+use minigrep::{search_in_file_contents, search_in_file_contents_sync, point_to_details, export_to_html, MatchResult};
 mod text;
 use std::fs;
 extern crate native_windows_gui as nwg;  
@@ -177,7 +178,7 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     filedialog: nwg::FileDialog,
     browse_button: nwg::Button,
     check_button: nwg::Button,
-    clear_button: nwg::Button,
+    export_button: Arc<RefCell<nwg::Button>>,
     list_view: nwg::ListView,
     dyn_tis: Arc<RefCell<nwg::Label>>,
     search_tis: Arc<RefCell<nwg::Label>>,
@@ -192,7 +193,8 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
     menu_switch_3_line: nwg::MenuItem,
     menu_switch_1_line: nwg::MenuItem,
 
-    event_handler: RefCell<Option<nwg::EventHandler>>,
+    event_handler_details: RefCell<Option<nwg::EventHandler>>,
+    event_handler_export: RefCell<Option<nwg::EventHandler>>,
     origin_text: Arc<RefCell<nwg::RichTextBox>>,
     origin_file: Arc<RefCell<nwg::TextInput>>,
     rich_text_font: nwg::Font,
@@ -274,7 +276,7 @@ impl BasicApp {
             }
         };
     
-        self.path_input_text.borrow().set_text(&path_str);
+        self.path_input_text.borrow_mut().set_text(&path_str);
     }
     
 
@@ -807,9 +809,9 @@ impl BasicApp {
     // 检测按钮点击后
     fn begin_check(&self) {
         self.list_view.clear();
-        let directory = self.path_input_text.borrow().text();
+        let directory = self.path_input_text.borrow_mut().text();
         if directory.is_empty() {
-            self.path_input_text.borrow().set_text("请输入日志目录");
+            self.path_input_text.borrow_mut().set_text("请输入日志目录");
             return;
         }
         self.search_tis.borrow_mut().set_text("搜索中...");
@@ -875,15 +877,20 @@ impl BasicApp {
         let file_name_storage = Arc::new(file_names);
         let matched_text_storage = Arc::new(matched_texts);  // 新增
         // 解除之前的事件处理器
-        if let Some(handler) = self.event_handler.borrow_mut().take() {
+        if let Some(handler) = self.event_handler_details.borrow_mut().take() {
             nwg::unbind_event_handler(&handler);
+        }
+        if let Some(handle) = self.event_handler_export.borrow_mut().take() {
+            nwg::unbind_event_handler(&handle);
         }
         // 绑定 `ListView` 的激活事件来处理复制逻辑
         let list_view_handle = &self.list_view.handle;
         let window_handle = &self.window.handle;
+        let export_button = Arc::clone(&self.export_button);
         let origin_text = Arc::clone(&self.origin_text);
         let origin_file = Arc::clone(&self.origin_file);
         let path_input_text = Arc::clone(&self.path_input_text);
+
         let new_handler = nwg::bind_event_handler(
             list_view_handle,  // 控件句柄
             window_handle,  // 父窗口句柄
@@ -892,100 +899,32 @@ impl BasicApp {
                 let file_name_storage = Arc::clone(&file_name_storage);
                 let matched_text_storage = Arc::clone(&matched_text_storage);  // 新增
                 let path_input_text = Arc::clone(&path_input_text);
+                let export_button = Arc::clone(&export_button);
                 // 正则表达式用于匹配 Unicode 转义字符
                 let re = Regex::new(r"\\u([0-9a-fA-F]{4})").unwrap();
                 move |evt, evt_data, _handle| {
                     match evt {
                         nwg::Event::OnListViewClick => {
-                            let (index,_) = evt_data.on_list_view_item_index();
-                            // 验证索引是否有效，防止崩溃
-                            if index < copy_storage.len() {
-                                if let Some(full_text) = copy_storage.get(index) {
-                                    // 使用正则表达式替换 Unicode 转义字符
-                                    let unescaped_text = re.replace_all(full_text, |caps: &regex::Captures| {
-                                        let code_point = u16::from_str_radix(&caps[1], 16).unwrap();
-                                        char::from_u32(u32::from(code_point)).unwrap().to_string()
-                                    });
-
-                                    // 将 \r\n 替换为 \n，标准化换行符，解决三行高亮异常的问题
-                                    let unescaped_text = unescaped_text.replace("\r\n", "\n");
-
-                                    origin_text.borrow_mut().set_text(&unescaped_text);
-
-                                    // 新增代码：定位并选中匹配的文本
-                                    if let Some(matched_text) = matched_text_storage.get(index) {
-                                        let mut match_positions = Vec::new(); // 存储所有匹配的字符位置
-                                    
-                                        let mut search_start = 0;
-                                        while let Some(byte_pos) = unescaped_text[search_start..].find(matched_text) {
-                                            let byte_pos = byte_pos + search_start;
-                                            // 将字节位置转换为字符索引
-                                            let start = unescaped_text[..byte_pos].chars().count();
-                                            let end = start + matched_text.chars().count();
-                                            match_positions.push((start, end));
-                                    
-                                            // 更新搜索起点，防止死循环
-                                            search_start = byte_pos + matched_text.len();
-                                        }
-                                    
-                                        // 设置文本内容
-                                        origin_text.borrow_mut().set_text(&unescaped_text);
-                                    
-                                        // 遍历每个匹配值，应用高亮格式
-                                        for &(start, end) in &match_positions {
-                                            // 设置选中范围
-                                            origin_text.borrow_mut().set_selection(start as u32..end as u32);
-                                    
-                                            // 设置字符格式（高亮显示）
-                                            let c1 = nwg::CharFormat {
-                                                text_color: Some([255, 0, 0]), // 红色字体
-                                                effects: None,
-                                                y_offset: None,
-                                                height: None,
-                                                font_face_name: None,
-                                                underline_type: None,
-                                            };
-                                            origin_text.borrow_mut().set_char_format(&c1);
-                                        }
-                                        origin_text.borrow_mut().set_selection(0..0);
-                                        origin_text.borrow_mut().set_focus();
-                                        // 将光标移动到第一个匹配值的位置，确保可见
-                                        if let Some(&(_, first_end)) = match_positions.first() {
-                                            // 获取文本的总长度
-                                            let total_length = unescaped_text.chars().count();
-                                    
-                                            // 计算行剩余长度
-                                            let line_remaining_length = total_length - first_end;
-                                    
-                                            // 定义光标新位置
-                                            let new_caret_pos = if line_remaining_length > 20 {
-                                                first_end + 19
-                                                } else {
-                                                    total_length - 1
-                                                };
-                                    
-                                            // 将选中范围设置为零长度，在新光标位置，以移动光标
-                                            origin_text.borrow_mut().set_selection(new_caret_pos as u32..new_caret_pos as u32);
-                                            origin_text.borrow_mut().set_focus();
-                                        }
-                                    
-                                        // 更新 file_name，添加匹配值数量提示
-                                        let match_count = match_positions.len();
-                                        let file_name_with_count = if match_count > 1 {
-                                            format!("({}个匹配值) | {}", match_count, file_name_storage.get(index).unwrap_or(&"".to_string()))
-                                        } else {
-                                            file_name_storage.get(index).unwrap_or(&"".to_string()).to_string()
-                                        };
-                                        // if let Some(file_name) = file_name_storage.get(index) {
-                                        //     origin_file.borrow_mut().set_text((file_name_with_count + file_name).as_str());
-                                        // }
-                                        origin_file.borrow_mut().set_text(&file_name_with_count);
-                                    }
-                                    
-                                }
-                            }
+                            point_to_details(
+                                evt_data,
+                                re.clone(),
+                                Arc::clone(&copy_storage),
+                                Arc::clone(&matched_text_storage),
+                                Arc::clone(&file_name_storage),
+                                Arc::clone(&origin_text),
+                                Arc::clone(&origin_file)
+                            )
                             
                         },
+                        nwg::Event::OnButtonClick => {
+                            if &_handle == &export_button.borrow_mut().handle {
+                                export_to_html(
+                                    Arc::clone(&matched_text_storage), 
+                                    Arc::clone(&file_name_storage), 
+                                    Arc::clone(&copy_storage)
+                                );
+                            }
+                        }
                         nwg::Event::OnFileDrop => {
                             let paths: Vec<PathBuf> = evt_data.on_file_drop().files().into_iter().map(PathBuf::from).collect();
                             if paths.is_empty() {
@@ -1003,7 +942,7 @@ impl BasicApp {
                                 }
                             };
                         
-                            path_input_text.borrow().set_text(&path_str);
+                            path_input_text.borrow_mut().set_text(&path_str);
                             
                         },
                         _ => {}
@@ -1012,7 +951,7 @@ impl BasicApp {
             }
         );
         // 存储新的事件处理器
-        *self.event_handler.borrow_mut() = Some(new_handler);
+        *self.event_handler_details.borrow_mut() = Some(new_handler);
     }
 
     // 清空展示列表
@@ -1070,7 +1009,7 @@ impl BasicApp {
                 _ => {}
             };
             if c.len() > 1 {
-                self.path_input_text.borrow().set_text(c.as_str());
+                self.path_input_text.borrow_mut().set_text(c.as_str());
             }
         }
     }
@@ -1206,9 +1145,9 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .build(&mut data.check_button)?;
             
             nwg::Button::builder()
-                .text("清空检测")  // 根据需要设定按钮功能
+                .text("导出结果")  // 根据需要设定按钮功能
                 .parent(&data.window)
-                .build(&mut data.clear_button)?;
+                .build(&mut data.export_button.borrow_mut())?;
 
             // 原文展示框
             
@@ -1359,7 +1298,7 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
 
             
 
-            data.event_handler = RefCell::new(None);
+            data.event_handler_details = RefCell::new(None);
             // Event handling
             let ui = BasicAppUi {
                 inner: Arc::new(data),
@@ -1376,8 +1315,8 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                                 ui.open_file_dialog(&handle);
                             } else if &handle == &ui.check_button {
                                 ui.begin_check();
-                            } else if &handle == &ui.clear_button {
-                                ui.clear_list_view();
+                            // } else if &handle == &ui.export_button {
+                            //     // ui.clear_list_view();
                             } else {
                                 ui.handle_button_click(&handle);
                             }// 处理保存按钮点击
@@ -1506,14 +1445,14 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 x.initialize_defaults();
             
             }
-            tmp = tmp.child_item(nwg::GridLayoutItem::new(&ui.search_tis.borrow().handle, col_num, row_num-1 , 2, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.dyn_tis.borrow().handle, col_num, row_num , 2, 2))
-                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text.borrow().handle, col_num, row_num + 2, 1, 1))
+            tmp = tmp.child_item(nwg::GridLayoutItem::new(&ui.search_tis.borrow_mut().handle, col_num, row_num-1 , 2, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.dyn_tis.borrow_mut().handle, col_num, row_num , 2, 2))
+                .child_item(nwg::GridLayoutItem::new(&ui.path_input_text.borrow_mut().handle, col_num, row_num + 2, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.browse_button, col_num +1 , row_num + 2, 1, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.check_button, col_num , row_num + 3, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.clear_button, col_num + 1 , row_num + 3, 1, 1))
-                .child_item(nwg::GridLayoutItem::new(&ui.origin_text.borrow().handle, col_num + 2, 0, 2, 3))
-                .child_item(nwg::GridLayoutItem::new(&ui.origin_file.borrow().handle, col_num + 2, 3, 2, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.export_button.borrow_mut().handle, col_num + 1 , row_num + 3, 1, 1))
+                .child_item(nwg::GridLayoutItem::new(&ui.origin_text.borrow_mut().handle, col_num + 2, 0, 2, 3))
+                .child_item(nwg::GridLayoutItem::new(&ui.origin_file.borrow_mut().handle, col_num + 2, 3, 2, 1))
                 .child_item(nwg::GridLayoutItem::new(&ui.list_view, col_num + 2 , 4, 2, 14));
 
             ui.inner.initialize_defaults();

@@ -67,3 +67,46 @@ pub const PACKAGE_RULES: &[(&str, &[&str])] = &[
         r"(A|a)(E|e)(S|s)_?(K|k)(E|e)(Y|y)",  // AES key 匹配
     ]),
 ];
+
+
+pub const HTML_HEAD: &str = r#"
+<html>
+<head>
+    <style>
+        .highlight {
+            background-color: yellow;
+            font-weight: bold;
+        }
+        .line-content {
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .file-section {
+            margin-bottom: 20px;
+        }
+        .expand-btn {
+            color: blue;
+            cursor: pointer;
+            font-size: 12px;
+        }
+    </style>
+    <script>
+        function toggleCollapse(id) {
+            var content = document.getElementById(id);
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+            } else {
+                content.classList.add('collapsed');
+            }
+        }
+    </script>
+</head>
+<body>
+    <h1>匹配结果导出</h1>
+"#;
+
+// HTML尾部
+pub const HTML_FOOTER: &str = r#"
+</body>
+</html>
+"#;
