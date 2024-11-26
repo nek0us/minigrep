@@ -144,7 +144,7 @@ pub fn export_to_html(
         }
     }
 
-    format!("{}{}</div><div id=\"content\">{}{}</div>{}", HTML_HEAD, sidebar_content, regex_content, html_content, HTML_FOOTER)
+    format!("{}{}</br></div><div id=\"content\">{}{}</div>{}", HTML_HEAD, sidebar_content, regex_content, html_content, HTML_FOOTER)
 
 
 }
