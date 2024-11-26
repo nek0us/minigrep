@@ -1,6 +1,6 @@
 [package]
 name = "minigrep"
-version = "1.6.1"
+version = "1.7.0"
 edition = "2021"
 build = "build.rs"
 
@@ -22,7 +22,7 @@ regex = "1.7"
 dirs = "4.0"
 tokio = { version = "1.41.1", features = ["sync", "macros", "rt-multi-thread", "io-util", "fs"] }
 futures = "*"
-
+html-escape = "*"
 # Windows子系统设置
 [profile.release]
 # 指示链接器为windows子系统构建程序，这样就不会有命令行窗口出现

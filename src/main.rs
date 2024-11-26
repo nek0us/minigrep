@@ -1,35 +1,32 @@
 #![windows_subsystem = "windows"]
-use std::borrow::Borrow;
-use std::{error::Error, path::PathBuf, vec};
-use minigrep::{search_in_file_contents, search_in_file_contents_sync, point_to_details, export_to_html, MatchResult};
-mod text;
 use std::fs;
-extern crate native_windows_gui as nwg;  
-use nwg::NativeUi;
-use clipboard_win::{formats,set_clipboard};
-use std::path::Path;
-use regex::Regex;
-use zip::read::ZipArchive;
-use std::io::{Cursor, Read, Write};
-use encoding_rs::GBK;
-use flate2::read::GzDecoder;
-use std::str::from_utf8;
-use std::process::{Stdio,Command};
-
-use std::cell::RefCell;  
-use std::cell::Cell;
 use std::time::Instant;
-
-// 多线程
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::str::from_utf8;
 use tokio::sync::Semaphore;
-
-use serde::{Deserialize, Serialize};
-use serde_yaml;
-use dirs::home_dir;
+use std::sync::{Arc, Mutex};
+use std::cell::{Cell, RefCell};  
+use std::io::{Cursor, Read, Write};
+use std::{error::Error, path::{Path, PathBuf}, vec};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use dirs::home_dir;
+
+extern crate native_windows_gui as nwg;  
+use nwg::NativeUi;
+
+use regex::Regex;
+use zip::read::ZipArchive;
+use encoding_rs::GBK;
+use flate2::read::GzDecoder;
+use std::process::{Stdio,Command};
+use clipboard_win::{formats,set_clipboard};
+
+use serde_yaml;
+use serde::{Deserialize, Serialize};
+
+mod text;
+use minigrep::{search_in_file_contents, search_in_file_contents_sync, point_to_details, export_to_html, save_html, MatchResult};
+
 #[derive(Serialize, Deserialize)]
 struct RuleConfig {
     name: String,
@@ -175,7 +172,8 @@ pub struct BasicApp {  // 定义一个名为 BasicApp 的公共结构体
 
     features: Vec<FeatureLayout>,
     path_input_text: Arc<RefCell<nwg::TextInput>>,
-    filedialog: nwg::FileDialog,
+    file_dialog_open: nwg::FileDialog,
+    file_dialog_save: Arc<RefCell<nwg::FileDialog>>,
     browse_button: nwg::Button,
     check_button: nwg::Button,
     export_button: Arc<RefCell<nwg::Button>>,
@@ -346,6 +344,8 @@ impl BasicApp {
         })
         .collect()
     }
+
+    
 
     // 获取文件进行判断
     fn get_file(&self,res: Arc<Mutex<Vec<MatchResult>>>, handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>, semaphore : Arc<Semaphore>,  regex_list: Arc<Vec<String>>, path: Arc<PathBuf>, base_dir: Arc<&Path>) -> Result<(), Box<dyn Error>> {
@@ -868,7 +868,18 @@ impl BasicApp {
             }
             
             let duration = start.elapsed();
-            self.search_tis.borrow_mut().set_text(format!("搜索完成,耗时：{:?}",duration).as_str());
+            let hours = duration.as_secs() / 3600;
+            let minutes = (duration.as_secs() % 3600) / 60;
+            let seconds = duration.as_secs() % 60;
+            let milliseconds = duration.subsec_millis();
+            let formatted_duration = if hours > 0 {
+                format!("搜索完成,耗时：{}小时{}分钟{}秒{}毫秒", hours, minutes, seconds, milliseconds)
+            } else if minutes > 0 {
+                format!("搜索完成,耗时：{}分钟{}秒{}毫秒", minutes, seconds, milliseconds)
+            } else {
+                format!("搜索完成,耗时：{}秒{}毫秒", seconds, milliseconds)
+            };
+            self.search_tis.borrow_mut().set_text(formatted_duration.as_str());
         });
     }
     
@@ -890,6 +901,10 @@ impl BasicApp {
         let origin_text = Arc::clone(&self.origin_text);
         let origin_file = Arc::clone(&self.origin_file);
         let path_input_text = Arc::clone(&self.path_input_text);
+        let save_dialog = Arc::clone(&self.file_dialog_save);
+
+        let regex_list: Arc<Vec<String>> = Arc::new(self.get_check_regex_list());
+        let dyn_tis = Arc::clone(&self.dyn_tis);
 
         let new_handler = nwg::bind_event_handler(
             list_view_handle,  // 控件句柄
@@ -900,6 +915,9 @@ impl BasicApp {
                 let matched_text_storage = Arc::clone(&matched_text_storage);  // 新增
                 let path_input_text = Arc::clone(&path_input_text);
                 let export_button = Arc::clone(&export_button);
+                let file_dialog_save = Arc::clone(&save_dialog);
+                let regex_list = Arc::clone(&regex_list);
+                let dyn_tis = Arc::clone(&dyn_tis);
                 // 正则表达式用于匹配 Unicode 转义字符
                 let re = Regex::new(r"\\u([0-9a-fA-F]{4})").unwrap();
                 move |evt, evt_data, _handle| {
@@ -918,11 +936,14 @@ impl BasicApp {
                         },
                         nwg::Event::OnButtonClick => {
                             if &_handle == &export_button.borrow_mut().handle {
-                                export_to_html(
+                                let html_content = export_to_html(
                                     Arc::clone(&matched_text_storage), 
+                                    Arc::clone(&regex_list), 
                                     Arc::clone(&file_name_storage), 
                                     Arc::clone(&copy_storage)
                                 );
+                                save_html(Arc::clone(&file_dialog_save), Arc::clone(&dyn_tis), &_handle, html_content);
+
                             }
                         }
                         nwg::Event::OnFileDrop => {
@@ -955,9 +976,9 @@ impl BasicApp {
     }
 
     // 清空展示列表
-    fn clear_list_view(&self) {
-        self.list_view.clear();
-    }
+    // fn clear_list_view(&self) {
+    //     self.list_view.clear();
+    // }
 
     // 添加按钮添加规则实例
     fn add_item(&self, feature_id: usize) {
@@ -986,8 +1007,8 @@ impl BasicApp {
     // 打开资源管理器载入检索路径
     fn open_file_dialog(&self, handle: &nwg::ControlHandle) {
         let mut c = String::new();
-        if self.filedialog.run(Some(handle)) {
-            match self.filedialog.get_selected_items() {
+        if self.file_dialog_open.run(Some(handle)) {
+            match self.file_dialog_open.get_selected_items() {
                 Ok(res) => {
                     if res.len() < 1 {
                        
@@ -1037,10 +1058,18 @@ impl BasicApp {
 
     // 绝对路径变相对路径
     fn strip_base_dir(&self, base_dir: &Path, full_path: &Path) -> String {
-        full_path.strip_prefix(base_dir)
-            .unwrap_or(full_path)
-            .to_string_lossy()
-            .to_string()
+        if base_dir == full_path {
+            // 如果基路径和完整路径相等，返回文件名或者空字符串
+            full_path.file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "".to_string())
+        } else {
+            // 否则尝试去掉基路径前缀
+            full_path.strip_prefix(base_dir)
+                .unwrap_or(full_path)
+                .to_string_lossy()
+                .to_string()
+        }
     }
 }
     
@@ -1191,10 +1220,16 @@ mod basic_app_ui {  // 定义一个模块，用于用户界面的管理
                 .expect("动态文字展示出错");
 
             let _ = nwg::FileDialog::builder()
-                .title("Hello")
+                .title("请选择要检索的文件，划选多个文件为检索该目录下所有文件")
                 .action(nwg::FileDialogAction::Open)
                 .multiselect(true)
-                .build(&mut data.filedialog);
+                .build(&mut data.file_dialog_open);
+
+            let _ = nwg::FileDialog::builder()
+                .title("请选择要保存的文件位置")
+                .action(nwg::FileDialogAction::Save)
+                .filters("HTML(*.html)")
+                .build(&mut data.file_dialog_save.borrow_mut());
 
             // 使用 InsertListViewColumn 来添加列
             data.list_view.set_headers_enabled(true);

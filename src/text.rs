@@ -1,6 +1,9 @@
 // src/text.rs
+
 pub const TITLE: &'static str =
     include_str!(concat!(env!("OUT_DIR"), "/VERSION"));
+
+
 
 pub const ABOUT_TEXT: &str = "注意:
 1. 本工具不能完全代替日志筛查,仅能用来筛查敏感信息
@@ -13,6 +16,10 @@ pub const ABOUT_TEXT: &str = "注意:
 7. 发布包扫描会反编译，所以速度较慢
 ";
 pub const UPDATE_LOG: &str = "
+version 1.7.0
+1. 添加扫描结果导出功能
+2. 移除【清空列表】按钮
+
 version 1.61
 1. 修复 1.6 release 版本在部分情况下扫描结果为空的问题
 
@@ -68,45 +75,148 @@ pub const PACKAGE_RULES: &[(&str, &[&str])] = &[
     ]),
 ];
 
-
 pub const HTML_HEAD: &str = r#"
 <html>
-<head>
-    <style>
-        .highlight {
-            background-color: yellow;
-            font-weight: bold;
-        }
-        .line-content {
-            font-family: monospace;
-            white-space: pre-wrap;
-        }
-        .file-section {
-            margin-bottom: 20px;
-        }
-        .expand-btn {
-            color: blue;
-            cursor: pointer;
-            font-size: 12px;
-        }
-    </style>
-    <script>
-        function toggleCollapse(id) {
-            var content = document.getElementById(id);
-            if (content.classList.contains('collapsed')) {
-                content.classList.remove('collapsed');
-            } else {
-                content.classList.add('collapsed');
+    <head>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                display: flex;
+                background-color: #f8f9fa;
+                color: #333;
             }
-        }
-    </script>
-</head>
-<body>
-    <h1>匹配结果导出</h1>
+            #sidebar {
+                width: 280px;
+                height: 100vh;
+                position: fixed;
+                left: 0;
+                top: 0;
+                overflow-y: auto;
+                padding: 20px;
+                background-color: #343a40;
+                border-right: 1px solid #ccc;
+                color: #ffffff;
+            }
+            #sidebar h2 {
+                color: #ffcc00;
+            }
+            #content {
+                margin-left: 300px;
+                padding: 20px;
+                width: calc(100% - 300px);
+                background-color: #ffffff;
+                border-left: 1px solid #dee2e6;
+            }
+            .regex-section {
+                background-color: #f1f1f1;
+                padding: 15px;
+                margin-bottom: 20px;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+            }
+            .highlight {
+                background-color: #ffcc00;
+                font-weight: bold;
+                color: #000000;
+            }
+            .line-content {
+                font-family: monospace;
+                white-space: pre-wrap;
+                margin: 0;
+                color: #444;
+            }
+            .file-section {
+                margin-bottom: 20px;
+                padding: 15px;
+                border: 1px solid #ced4da;
+                border-radius: 5px;
+                background-color: #e9ecef;
+            }
+            .match {
+                margin: 10px 0;
+                background-color: #f8f9fa;
+                border-radius: 5px;
+                padding: 10px;
+            }
+            .code-container {
+                display: flex;
+                align-items: center;
+                cursor: pointer;
+                margin: 5px 0;
+                padding: 8px;
+                background-color: #f1f3f5;
+                border-radius: 5px;
+                transition: background-color 0.3s ease;
+            }
+            .code-container:hover {
+                background-color: #e2e6ea;
+            }
+            .code-left, .code-right {
+                font-family: monospace;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .code-left {
+                text-align: right;
+                padding-right: 5px;
+                color: #666;
+                flex: 1;
+            }
+            .code-right {
+                text-align: left;
+                padding-left: 5px;
+                color: #666;
+                flex: 2;
+            }
+            .full-line {
+                display: none;
+                margin-top: 10px;
+                font-family: monospace;
+                background-color: #f8f9fa;
+                padding: 15px;
+                border: 1px solid #ced4da;
+                border-radius: 5px;
+            }
+            .full-line.show {
+                display: block;
+            }
+            a {
+                text-decoration: none;
+                color: #ffc107;
+            }
+            a:hover {
+                text-decoration: underline;
+                color: #ffdd57;
+            }
+        </style>
+        <script>
+            function toggleFullLine(id) {
+                const fullLine = document.getElementById(id);
+                const codeContainer = document.querySelector(`[data-id="${id}"]`);
+                if (fullLine.classList.contains('show')) {
+                    fullLine.classList.remove('show');
+                    codeContainer.style.display = 'flex'; // 恢复原来的部分上下文显示
+                } else {
+                    fullLine.classList.add('show');
+                    codeContainer.style.display = 'none'; // 隐藏部分上下文显示
+                }
+            }
+            function scrollToMatch(id) {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }
+        </script>
+    </head>
+    <body>
+        <div id="sidebar">
+            <h2>目录</h2>
 "#;
 
-// HTML尾部
 pub const HTML_FOOTER: &str = r#"
-</body>
+        </div>
+    </body>
 </html>
 "#;

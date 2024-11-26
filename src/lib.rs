@@ -1,22 +1,23 @@
-
-use std::error::Error;
 use std::env;
 use std::fs::File;
 use std::io::Write;
+use std::error::Error;
 use pcre2::bytes::Regex;
 use regex::Regex as Regex_origin;
-use encoding_rs::GBK;
-use text::{HTML_FOOTER, HTML_HEAD};
 
-use std::sync::{Arc,Mutex};
-use tokio::sync::Semaphore;
 use tokio;
+use tokio::sync::Semaphore;
 use std::cell::RefCell;
+use std::sync::{Arc,Mutex};
+
+use encoding_rs::GBK;
+use html_escape::encode_text;
 
 use native_windows_gui::EventData;
 extern crate native_windows_gui as nwg;  
 
 mod text;
+use text::{HTML_FOOTER, HTML_HEAD};
 
 #[derive(Debug, Clone)]
 pub struct MatchResult {
@@ -28,100 +29,127 @@ pub struct MatchResult {
 
 
 pub fn export_to_html(
-    matched_text_storage: Arc<Vec<String>>,
+    matched_text_storage: Arc<Vec<String>>, 
+    regex_list: Arc<Vec<String>>,
     file_name_storage: Arc<Vec<String>>,
     copy_storage: Arc<Vec<String>>,
-) {
-    // 定义一个HTML的头部
-
-
-    // 生成HTML内容部分
+) -> String {
     let mut html_content = String::new();
-
-    // 正则表达式，用于匹配 Unicode 转义字符（如果有）
-    let re = Regex_origin::new(r"\\u([0-9a-fA-F]{4})").unwrap();
+    let mut sidebar_content = String::new();
+    let mut regex_content = String::new();
+    regex_content.push_str("<div id=\"regex-list\" class=\"regex-section\"><h2>使用的正则表达式</h2><ul>");
+    for regex in regex_list.iter() {
+        regex_content.push_str(&format!("<li>{}</li>", encode_text(regex)));
+    }
+    regex_content.push_str("</ul></div>");
 
     for (index, file_name) in file_name_storage.iter().enumerate() {
         if let Some(full_text) = copy_storage.get(index) {
-            // 使用正则表达式替换 Unicode 转义字符
-            let unescaped_text = re.replace_all(full_text, |caps: &regex::Captures| {
-                let code_point = u16::from_str_radix(&caps[1], 16).unwrap();
-                char::from_u32(u32::from(code_point)).unwrap().to_string()
-            });
-
-            // 在文件结果部分添加标题
-            html_content.push_str(&format!("<div class=\"file-section\"><h2>文件路径: {}</h2>", file_name));
-
-            // 获取当前文件的匹配文本
             if let Some(matched_text) = matched_text_storage.get(index) {
-                let mut match_positions = Vec::new(); // 存储所有匹配的字符位置
+                let match_id = format!("match-{}", index);
+
+                // 添加到侧边栏的导航项
+                sidebar_content.push_str(&format!(
+                    "<p><a href=\"javascript:void(0);\" onclick=\"scrollToMatch('{}')\">{} {} </a></p>", // ({}) </a></p>
+                    match_id, &index.clone() + 1, matched_text //, file_name
+                ));
+
+                // 正确展示文件路径和匹配值
+                html_content.push_str(&format!(
+                    "<div id=\"{}\" class=\"file-section\"><h2>{} {}</h2><p>文件路径: {}</p>",
+                    match_id, &index.clone() + 1, matched_text, file_name
+                ));
+
+                let mut match_positions = Vec::new();
                 let mut search_start = 0;
 
-                // 寻找匹配值的所有位置
-                while let Some(byte_pos) = unescaped_text[search_start..].find(matched_text) {
+                while let Some(byte_pos) = full_text[search_start..].find(matched_text) {
                     let byte_pos = byte_pos + search_start;
-                    let start = unescaped_text[..byte_pos].chars().count();
+                    let start = full_text[..byte_pos].chars().count();
                     let end = start + matched_text.chars().count();
                     match_positions.push((start, end));
-
                     search_start = byte_pos + matched_text.len();
                 }
 
-                // 每个匹配项生成一行结果
-                for (start, end) in match_positions.clone() {
-                    // 显示匹配行（部分或完整）
-                    let line_context = &unescaped_text[start..end]; // 上下文+匹配值部分
+                // 只显示第一段匹配行上下文
+                if let Some((start, end)) = match_positions.first() {
+                    let left_context_start = start.saturating_sub(50);
+                    let right_context_end = std::cmp::min(end + 50, full_text.chars().count());
 
-                    // 高亮匹配值并添加上下文
+                    let left_context: String = full_text.chars().skip(left_context_start).take(start - left_context_start).collect();
+                    let matched_context: String = full_text.chars().skip(start.clone()).take(end - start).collect();
+                    let right_context: String = full_text.chars().skip(end.clone()).take(right_context_end - end).collect();
+
                     html_content.push_str(&format!(
                         r#"
-                        <div class="match">
-                            <p><strong>匹配值:</strong> <span class="highlight">{}</span></p>
-                            <p><strong>匹配行：</strong><span class="line-content">{}</span></p>
-                            <button class="expand-btn" onclick="toggleCollapse('context-{}')">展开上下文</button>
-                            <div id="context-{}" class="collapsed">
-                                <div class="line-content">{}</div>
+                            <div class="match">
+                                <div class="code-container" data-id="context-{}" onclick="toggleFullLine('context-{}')">
+                                    <div class="code-left">{}</div>
+                                    <div class="highlight">{}</div>
+                                    <div class="code-right">{}</div>
+                                </div>
                             </div>
-                        </div>
                         "#,
-                        matched_text,
-                        line_context,
-                        index, // 给每个匹配项一个唯一ID
                         index,
-                        &unescaped_text[start..end] // 展开时显示更多上下文
+                        index,
+                        left_context,
+                        matched_context,
+                        right_context
                     ));
                 }
 
-                // 显示该文件的匹配总数
+                // 展开全文，显示所有匹配值高亮
+
+                let highlighted_full_context = {
+                    let mut highlighted = String::new();
+                    let mut current_index = 0; // 当前字符索引
+                
+                    // 遍历全文字符
+                    for (_i, ch) in full_text.chars().enumerate() {
+                        if let Some(&(start, _end)) = match_positions.iter().find(|&&(s, _e)| s == current_index) {
+                            // 如果当前位置匹配开始，则插入高亮标签
+                            if current_index == start {
+                                highlighted.push_str("<span class=\"highlight\">");
+                            }
+                        }
+                        
+                        // 添加当前字符到结果
+                        highlighted.push(ch);
+                
+                        // 如果当前位置是匹配结束，则关闭高亮标签
+                        if match_positions.iter().any(|&(_s, e)| e == current_index + 1) {
+                            highlighted.push_str("</span>");
+                        }
+                
+                        current_index += 1; // 更新字符索引
+                    }
+                
+                    highlighted
+                };
+                
+                html_content.push_str(&format!(
+                    r#"
+                        <div id="context-{}" class="full-line">
+                            <div class="line-content">{}</div>
+                        </div>
+                    "#,
+                    index,
+                    highlighted_full_context
+                ));
+
                 html_content.push_str(&format!("<p>总共匹配 {} 个值</p>", match_positions.len()));
             }
 
-            // 文件部分结束
             html_content.push_str("</div>");
         }
     }
 
-    // 拼接完整的HTML内容
-    let full_html = format!("{}{}{}", HTML_HEAD, html_content, HTML_FOOTER);
+    format!("{}{}</div><div id=\"content\">{}{}</div>{}", HTML_HEAD, sidebar_content, regex_content, html_content, HTML_FOOTER)
 
-    // 将生成的HTML保存到文件
-    let file_name = "scan_results.html";
-    let mut file: File = match File::create(file_name) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("无法创建文件: {}", e);
-            return;
-        }
-    };
 
-    if let Err(e) = file.write(full_html.as_bytes()) {
-        println!("写入文件失败: {}", e);
-    } else {
-        println!("结果已保存到 {}", file_name);
-    }
 }
 
-pub fn point_to_details(evt_data: EventData,re: Regex_origin,copy_storage: Arc<Vec<String>>,matched_text_storage: Arc<Vec<String>>,file_name_storage: Arc<Vec<String>>,origin_text: Arc<RefCell<nwg::RichTextBox>>,origin_file: Arc<RefCell<nwg::TextInput>>) {
+pub fn point_to_details(evt_data: EventData,re: Regex_origin,copy_storage: Arc<Vec<String>>,matched_text_storage: Arc<Vec<String>>, file_name_storage: Arc<Vec<String>>,origin_text: Arc<RefCell<nwg::RichTextBox>>,origin_file: Arc<RefCell<nwg::TextInput>>) {
     let (index,_) = evt_data.on_list_view_item_index();
     // 验证索引是否有效，防止崩溃
     if index < copy_storage.len() {
@@ -209,6 +237,33 @@ pub fn point_to_details(evt_data: EventData,re: Regex_origin,copy_storage: Arc<V
             
         }
     }
+}
+
+pub fn save_html(file_dialog_save: Arc<RefCell<nwg::FileDialog>>,dyn_tis: Arc<RefCell<nwg::Label>>, handle: &nwg::ControlHandle,html_content: String) {
+    // 将生成的HTML保存到文件
+    if file_dialog_save.borrow_mut().run(Some(handle)) {
+        if let Ok(path) =file_dialog_save.borrow_mut().get_selected_item() {
+            let mut path = path.into_string().unwrap_or_else(|_| String::new());
+
+        if !path.ends_with(".html") {
+            path.push_str(".html");
+        }
+            let mut file: File = match File::create(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    println!("无法创建文件: {}", e);
+                    return;
+                }
+            };
+        
+            if let Err(e) = file.write(html_content.as_bytes()) {
+                println!("写入文件失败: {}", e);
+            } else {
+                dyn_tis.borrow_mut().set_text(format!("结果已保存到 {}", &path).as_str());
+            }
+        }
+    }
+
 }
 
 pub fn search_in_file_contents_sync(res : Arc<Mutex<Vec<MatchResult>>>, regex_list: Arc<Vec<String>>, contents: &str, file_name: &str) {
