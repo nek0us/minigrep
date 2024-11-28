@@ -51,13 +51,13 @@ pub fn export_to_html(
                 // 添加到侧边栏的导航项
                 sidebar_content.push_str(&format!(
                     "<p><a href=\"javascript:void(0);\" onclick=\"scrollToMatch('{}')\">{} {} </a></p>", // ({}) </a></p>
-                    match_id, &index.clone() + 1, matched_text //, file_name
+                    match_id, &index.clone() + 1, encode_text(matched_text) //, file_name
                 ));
 
                 // 正确展示文件路径和匹配值
                 html_content.push_str(&format!(
                     "<div id=\"{}\" class=\"file-section\"><h2>{} {}</h2><p>文件路径: {}</p>",
-                    match_id, &index.clone() + 1, matched_text, file_name
+                    match_id, &index.clone() + 1, encode_text(matched_text), encode_text(file_name)
                 ));
 
                 let mut match_positions = Vec::new();
@@ -92,9 +92,9 @@ pub fn export_to_html(
                         "#,
                         index,
                         index,
-                        left_context,
-                        matched_context,
-                        right_context
+                        encode_text(&left_context),
+                        encode_text(&matched_context),
+                        encode_text(&right_context)
                     ));
                 }
 
@@ -114,7 +114,8 @@ pub fn export_to_html(
                         }
                         
                         // 添加当前字符到结果
-                        highlighted.push(ch);
+                        let tmp_string = ch.to_string();
+                        highlighted.push_str(&encode_text(&tmp_string)); // 编码后的字符
                 
                         // 如果当前位置是匹配结束，则关闭高亮标签
                         if match_positions.iter().any(|&(_s, e)| e == current_index + 1) {

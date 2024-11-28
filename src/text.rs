@@ -16,6 +16,9 @@ pub const ABOUT_TEXT: &str = "注意:
 7. 发布包扫描会反编译，所以速度较慢
 ";
 pub const UPDATE_LOG: &str = "
+version 1.7.1
+1. html报告优化
+
 version 1.7.0
 1. 添加扫描结果导出功能
 2. 移除【清空列表】按钮
